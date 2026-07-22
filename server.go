@@ -27,6 +27,7 @@ func serve(ctx context.Context, webAddr string, hub *Hub, logPath string) error 
 	mux.Handle(RouteIndex, http.FileServer(http.FS(static)))
 	mux.HandleFunc(RouteEvents, streamSamples(hub))
 	mux.HandleFunc(RouteLog, serveLog(logPath))
+	mux.HandleFunc(RouteHistory, serveHistory(logPath))
 
 	srv := &http.Server{Addr: webAddr, Handler: mux}
 

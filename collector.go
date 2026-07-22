@@ -39,8 +39,8 @@ func (c *StarlinkCollector) Collect(ctx context.Context) (Sample, error) {
 	if s == nil {
 		return Sample{}, fmt.Errorf("response contained no dish status")
 	}
-
-	obstructed := s.GetObstructionStats().GetCurrentlyObstructed()
+	obs := s.GetObstructionStats()
+	obstructed := obs.GetCurrentlyObstructed()
 	drop := float64(s.GetPopPingDropRate())
 
 	return Sample{
@@ -51,6 +51,7 @@ func (c *StarlinkCollector) Collect(ctx context.Context) (Sample, error) {
 		UplinkMbps:      float64(s.GetUplinkThroughputBps()) / 1e6,
 		DropRate:        drop,
 		Obstructed:      obstructed,
+		ObstructionFraction: float64(obs.GetFractionObstructed()),
 		UptimeSeconds:   s.GetDeviceState().GetUptimeS(),
 		HardwareVersion: s.GetDeviceInfo().GetHardwareVersion(),
 		SoftwareVersion: s.GetDeviceInfo().GetSoftwareVersion(),

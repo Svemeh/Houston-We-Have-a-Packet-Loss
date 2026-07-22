@@ -106,6 +106,7 @@ func runCheck(c Collector, timeout time.Duration) error {
 	fmt.Printf("  link:      %s\n", s.Link)
 	fmt.Printf("  latency:   %.1f ms\n", s.LatencyMs)
 	fmt.Printf("  drop rate: %.1f%%\n", s.DropRate*100)
+	fmt.Printf("  obstruction: %.2f%% of sky\n", s.ObstructionFraction*100)
 	fmt.Printf("  hardware:  %s\n", s.HardwareVersion)
 	fmt.Printf("  software:  %s\n", s.SoftwareVersion)
 	fmt.Printf("  uptime:    %s\n", time.Duration(s.UptimeSeconds)*time.Second)

@@ -17,10 +17,15 @@ const (
 	HistoryWindow = 45 * time.Minute
 
 	// Web UI: the dashboard
-	DefaultWebAddr = ":8080"
+	DefaultWebAddr = ":2101"
 	RouteIndex     = "/"
 	RouteEvents    = "/events"
 	RouteLog       = "/log"
+	RouteHistory   = "/history"
+
+	RangeAll         = "all"
+	MaxRangeDuration = 24 * time.Hour
+	MaxHistoryPoints = 2000
 
 	// Persistence: relative path to raw telemetry log
 	// single JSON-Lines file (one sample per line).
