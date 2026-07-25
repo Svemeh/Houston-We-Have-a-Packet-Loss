@@ -17,7 +17,7 @@
   const connectionIndicator = byId("connection-status");
   const connectionText = byId("connection-text");
 
-  const traceFillOpacity = 0.12; // Opacity of fill under line in the live charts
+  const traceFillOpacity = 0.03; // Opacity of fill under line in the live charts
 
   const formatNumber = (value, decimals = 1) =>
     value == null || isNaN(value) ? "—" : Number(value).toFixed(decimals);
@@ -371,10 +371,17 @@
       hoverBadge.style.top = canvas.offsetTop + "px";
 
       const pointTime = hoveredPoint.time;
+
+      const day = pointTime.getDate();
+      const month = pointTime.toLocaleString("en-US", { month: "short" });
+      const dateLabel = `${day}. ${month}`;
+
       const hours = String(pointTime.getHours()).padStart(2, "0");
       const minutes = String(pointTime.getMinutes()).padStart(2, "0");
       const seconds = String(pointTime.getSeconds()).padStart(2, "0");
-      hoverBadge.innerHTML = `${formatValue(hoveredPoint.value)}` + `<span class="hover-badge-time">${hours}:${minutes}:${seconds}</span>`;
+      const timeLabel = `${hours}:${minutes}:${seconds}`;
+
+      hoverBadge.innerHTML = `${formatValue(hoveredPoint.value)}` + `<span class="hover-badge-time">${dateLabel} - ${timeLabel}</span>`;
       hoverBadge.classList.add("is-visible");
     }
 
@@ -407,8 +414,8 @@
     canvasId: "chart-latency",
     rangeLabelId: "chart-range-latency",
     unit: "ms",
-    minAxisTop: 60,
-    axisRounding: 20,
+    minAxisTop: 20,
+    axisRounding: 10,
     colorVar: "--chart-latency",
     formatValue: formatMs,
   });
@@ -426,8 +433,8 @@
     canvasId: "chart-download",
     rangeLabelId: "chart-range-download",
     unit: "Mbps",
-    minAxisTop: 100,
-    axisRounding: 100,
+    minAxisTop: 5,
+    axisRounding: 10,
     colorVar: "--chart-download",
     formatValue: formatMbps,
   });
@@ -435,8 +442,8 @@
     canvasId: "chart-upload",
     rangeLabelId: "chart-range-upload",
     unit: "Mbps",
-    minAxisTop: 20,
-    axisRounding: 20,
+    minAxisTop: 5,
+    axisRounding: 10,
     colorVar: "--chart-upload",
     formatValue: formatMbps,
   });
