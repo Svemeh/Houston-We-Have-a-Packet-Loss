@@ -17,6 +17,8 @@
   const connectionIndicator = byId("connection-status");
   const connectionText = byId("connection-text");
 
+  const traceFillOpacity = 0.12; // Opacity of fill under line in the live charts
+
   const formatNumber = (value, decimals = 1) =>
     value == null || isNaN(value) ? "—" : Number(value).toFixed(decimals);
 
@@ -118,8 +120,10 @@
   const LEADING_DOT_RADIUS_PX = 2.6;
   const HOVER_DOT_RADIUS_PX = 3.2;
   const HOVER_RING_RADIUS_PX = 5.5;
-  const CROSSHAIR_LINE_COLOR = "rgba(245,183,64,.35)";
-  const CROSSHAIR_RING_COLOR = "rgba(245,183,64,.45)";
+
+  const amber = getCssVar("--amber").trim();
+  const CROSSHAIR_LINE_COLOR = withAlpha(amber, 0.35);
+  const CROSSHAIR_RING_COLOR = withAlpha(amber, 0.45);
 
   function createScope(config) {
     const canvas = byId(config.canvasId);
@@ -253,6 +257,8 @@
         }
         canvasCtx.lineTo(xForTime(segment[segment.length - 1].time), plotHeight);
         canvasCtx.closePath();
+        canvasCtx.fillStyle = withAlpha(traceColor, traceFillOpacity);
+        canvasCtx.fill();
         // Trace
         canvasCtx.beginPath();
         for (let pointIndex = 0; pointIndex < segment.length; pointIndex++) {

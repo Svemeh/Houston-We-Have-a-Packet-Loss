@@ -450,6 +450,10 @@ header {
   flex: 0 0 auto;
 }
 
+.status-strip .status-value.is-row #line-of-sight-state {
+  white-space: nowrap;
+}
+
 /* ---- Footer ------------------------------------------------------------ */
 
 footer {
@@ -521,6 +525,14 @@ footer {
   }
   .alarm-subtext {
     display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .status-strip .status-value.is-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
   }
 }
 
