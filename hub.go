@@ -2,67 +2,76 @@ package main
 
 import "sync"
 
-type Hub struct {
-	mu       sync.Mutex
-	buffer   []Sample                  // ring buffer, chronological order
-	capacity int                       // max samples retained
-	subs     map[chan Sample]struct{}  // active subscribers
+// subscriberQueueDepth is how many samples a single browser can fall behind
+// before we start dropping its updates rather than stalling every other client.
+const subscriberQueueDepth = 16
+
+// TelemetryHub fans each new sample out to every connected browser and keeps a
+// short rolling history, so a tab that connects late has something to draw.
+type TelemetryHub struct {
+	mutex              sync.Mutex
+	recentSamples      []TelemetrySample                 // ring buffer, chronological order
+	maxRetainedSamples int                               // how many samples recentSamples holds
+	subscribers        map[chan TelemetrySample]struct{} // one channel per connected browser
 }
 
-func NewHub(capacity int) *Hub {
-	return &Hub{
-		buffer:   make([]Sample, 0, capacity),
-		capacity: capacity,
-		subs:     make(map[chan Sample]struct{}),
+func NewTelemetryHub(maxRetainedSamples int) *TelemetryHub {
+	return &TelemetryHub{
+		recentSamples:      make([]TelemetrySample, 0, maxRetainedSamples),
+		maxRetainedSamples: maxRetainedSamples,
+		subscribers:        make(map[chan TelemetrySample]struct{}),
 	}
 }
 
-func (h *Hub) SetInitial(samples []Sample) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(samples) > h.capacity {
-		samples = samples[len(samples)-h.capacity:]
+// SeedHistory pre-fills the rolling history, normally from the log file at startup.
+func (hub *TelemetryHub) SeedHistory(samples []TelemetrySample) {
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
+	if len(samples) > hub.maxRetainedSamples {
+		samples = samples[len(samples)-hub.maxRetainedSamples:]
 	}
-	h.buffer = append(h.buffer[:0], samples...)
+	hub.recentSamples = append(hub.recentSamples[:0], samples...)
 }
 
-func (h *Hub) Publish(s Sample) {
-	h.mu.Lock()
-	h.buffer = append(h.buffer, s)
-	if len(h.buffer) > h.capacity {
-		h.buffer = h.buffer[len(h.buffer)-h.capacity:]
+func (hub *TelemetryHub) PublishSample(sample TelemetrySample) {
+	hub.mutex.Lock()
+	hub.recentSamples = append(hub.recentSamples, sample)
+	if len(hub.recentSamples) > hub.maxRetainedSamples {
+		hub.recentSamples = hub.recentSamples[len(hub.recentSamples)-hub.maxRetainedSamples:]
 	}
 
-	subs := make([]chan Sample, 0, len(h.subs))
-	for c := range h.subs {
-		subs = append(subs, c)
+	currentSubscribers := make([]chan TelemetrySample, 0, len(hub.subscribers))
+	for subscriber := range hub.subscribers {
+		currentSubscribers = append(currentSubscribers, subscriber)
 	}
-	h.mu.Unlock()
+	hub.mutex.Unlock()
 
-	for _, c := range subs {
+	for _, subscriber := range currentSubscribers {
 		select {
-		case c <- s:
+		case subscriber <- sample:
 		default:
 		}
 	}
 }
 
-func (h *Hub) Subscribe() (ch <-chan Sample, snapshot []Sample, unsub func()) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// Subscribe hands back a live stream, a copy of the history so far, and
+// the function the caller must invoke to detach.
+func (hub *TelemetryHub) Subscribe() (stream <-chan TelemetrySample, backfill []TelemetrySample, unsubscribe func()) {
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
 
-	c := make(chan Sample, 16)
-	h.subs[c] = struct{}{}
+	subscriber := make(chan TelemetrySample, subscriberQueueDepth)
+	hub.subscribers[subscriber] = struct{}{}
 
-	snap := make([]Sample, len(h.buffer))
-	copy(snap, h.buffer)
+	snapshot := make([]TelemetrySample, len(hub.recentSamples))
+	copy(snapshot, hub.recentSamples)
 
-	return c, snap, func() {
-		h.mu.Lock()
-		if _, ok := h.subs[c]; ok {
-			delete(h.subs, c)
-			close(c)
+	return subscriber, snapshot, func() {
+		hub.mutex.Lock()
+		if _, stillSubscribed := hub.subscribers[subscriber]; stillSubscribed {
+			delete(hub.subscribers, subscriber)
+			close(subscriber)
 		}
-		h.mu.Unlock()
+		hub.mutex.Unlock()
 	}
 }

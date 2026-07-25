@@ -1,116 +1,158 @@
 (() => {
   "use strict";
 
-  const STATES = {
-    "ONLINE":     {cls:"state-nominal", msg:"ALL SYSTEMS NOMINAL",       sub:""},
-    "DEGRADED":   {cls:"state-caution", msg:"PACKET LOSS DETECTED",      sub:"caution"},
-    "OBSTRUCTED": {cls:"state-alarm",   msg:"LINE OF SIGHT OBSTRUCTED",  sub:"off-nominal"},
-    "NO SIGNAL":  {cls:"state-alarm",   msg:"SIGNAL LOST — REACQUIRING", sub:"off-nominal"},
-    "OFFLINE":    {cls:"state-alarm",   msg:"TELEMETRY LINK DOWN",       sub:"no contact"},
+  // How each link state is presented in the alarm strip.
+  const LINK_STATE_DISPLAY = {
+    ONLINE: { className: "state-nominal", message: "ALL SYSTEMS NOMINAL", subtext: "" },
+    DEGRADED: { className: "state-caution", message: "PACKET LOSS DETECTED", subtext: "caution" },
+    OBSTRUCTED: { className: "state-alarm", message: "LINE OF SIGHT OBSTRUCTED", subtext: "off-nominal" },
+    "NO SIGNAL": { className: "state-alarm", message: "SIGNAL LOST — REACQUIRING", subtext: "off-nominal" },
+    OFFLINE: { className: "state-alarm", message: "TELEMETRY LINK DOWN", subtext: "no contact" },
   };
 
-  const $ = id => document.getElementById(id);
-  const alarm = $("alarm"), alarmMsg = $("alarm-msg"), alarmSub = $("alarm-sub");
-  const conn = $("conn"), connTxt = $("conn-txt");
-  const fmt = (v, d=1) => (v==null || isNaN(v)) ? "—" : Number(v).toFixed(d);
+  const byId = elementId => document.getElementById(elementId);
+  const alarmStrip = byId("alarm-strip");
+  const alarmMessage = byId("alarm-message");
+  const alarmSubtext = byId("alarm-subtext");
+  const connectionIndicator = byId("connection-status");
+  const connectionText = byId("connection-text");
 
-  function get(sec){
-    sec = Math.max(0, Math.floor(sec||0));
-    const d = Math.floor(sec/86400); sec-=d*86400;
-    const h = Math.floor(sec/3600);  sec-=h*3600;
-    const m = Math.floor(sec/60);    const s = sec-m*60;
-    const p = n => String(n).padStart(2,"0");
-    return `${String(d).padStart(3,"0")}:${p(h)}:${p(m)}:${p(s)}`;
+  const traceFillOpacity = 0.12; // Opacity of fill under line in the live charts
+
+  const formatNumber = (value, decimals = 1) =>
+    value == null || isNaN(value) ? "—" : Number(value).toFixed(decimals);
+
+  // Renders dish uptime as the mission-clock readout, DDD:HH:MM:SS.
+  function formatUptimeClock(totalSeconds) {
+    let remaining = Math.max(0, Math.floor(totalSeconds || 0));
+    const days = Math.floor(remaining / 86400);
+    remaining -= days * 86400;
+    const hours = Math.floor(remaining / 3600);
+    remaining -= hours * 3600;
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining - minutes * 60;
+    const pad = number => String(number).padStart(2, "0");
+    return `${String(days).padStart(3, "0")}:${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
   }
 
-  function setState(link){
-    const st = STATES[link] || STATES["OFFLINE"];
-    alarm.className = "alarm-strip " + st.cls;
-    alarmMsg.textContent = st.msg;
-    alarmSub.textContent = st.sub;
+  function setLinkState(linkState) {
+    const display = LINK_STATE_DISPLAY[linkState] || LINK_STATE_DISPLAY["OFFLINE"];
+    alarmStrip.className = "alarm-strip " + display.className;
+    alarmMessage.textContent = display.message;
+    alarmSubtext.textContent = display.subtext;
   }
 
   // ---- Time ranges -------------------------------------------------------
-  // `ms: null` means everything in the log. For that case the window start is
-  // pinned to the oldest sample the server returns and the span grows as time
-  // passes, rather than sliding.
+  // `spanMs: null` means everything in the log. For that case the window start
+  // is pinned to the oldest sample the server returns and the span grows as
+  // time passes, rather than sliding.
   //
   // The id doubles as the query value, so it has to parse as a Go duration
   // (or be the literal "all").
   const RANGES = [
-    {id:"2m",  label:"2m",  ms: 2*60*1000},
-    {id:"5m",  label:"5m",  ms: 5*60*1000},
-    {id:"15m", label:"15m", ms: 15*60*1000},
-    {id:"1h",  label:"1h",  ms: 60*60*1000},
-    {id:"6h",  label:"6h",  ms: 6*60*60*1000},
-    {id:"24h", label:"24h", ms: 24*60*60*1000},
-    {id:"all", label:"All", ms: null},
+    { id: "2m", label: "2m", spanMs: 2 * 60 * 1000 },
+    { id: "5m", label: "5m", spanMs: 5 * 60 * 1000 },
+    { id: "15m", label: "15m", spanMs: 15 * 60 * 1000 },
+    { id: "1h", label: "1h", spanMs: 60 * 60 * 1000 },
+    { id: "6h", label: "6h", spanMs: 6 * 60 * 60 * 1000 },
+    { id: "24h", label: "24h", spanMs: 24 * 60 * 60 * 1000 },
+    { id: "all", label: "All", spanMs: null },
   ];
-  const DEFAULT_RANGE = "15m";
+  const DEFAULT_RANGE_ID = "15m";
 
-  const view = {
-    range:   RANGES.find(r => r.id === DEFAULT_RANGE),
-    startMs: null,   // only set for the "all" range
-    gapMs:   3000,   // adjacent samples further apart than this break the trace
+  // Adjacent samples further apart than the gap threshold break the trace.
+  const MIN_GAP_THRESHOLD_MS = 3000;
+  const GAP_THRESHOLD_MULTIPLIER = 2.5; // slack over the server's bucket width
+  const ASSUMED_BUCKET_MS = 1000; // used when the server doesn't report one
+  const EMPTY_ALL_RANGE_SPAN_MS = 60 * 1000; // "All" with nothing logged yet
+
+  const viewWindow = {
+    selectedRange: RANGES.find(range => range.id === DEFAULT_RANGE_ID),
+    pinnedStartMs: null, // only set for the "all" range
+    gapThresholdMs: MIN_GAP_THRESHOLD_MS,
   };
 
-  function viewStart(now){
-    return view.startMs !== null ? view.startMs : now - view.range.ms;
+  function viewWindowStartMs(nowMs) {
+    return viewWindow.pinnedStartMs !== null ? viewWindow.pinnedStartMs : nowMs - viewWindow.selectedRange.spanMs;
   }
 
-  // Hard ceiling on retained points. Pruning is normally by time (see prune),
-  // this only catches the "all" range left running for hours.
-  const MAXPTS = 20000;
+  // Hard ceiling on retained points. Pruning is normally by time (see
+  // dropPointsBefore), this only catches the "all" range left running for hours.
+  const MAX_POINTS_PER_SCOPE = 20000;
 
-  const cssCache = {};
-  function getCSS(name){
-    if(!cssCache[name]) cssCache[name]=getComputedStyle(document.documentElement).getPropertyValue(name);
-    return cssCache[name];
+  const cssVarCache = {};
+  function getCssVar(variableName) {
+    if (!cssVarCache[variableName]) {
+      cssVarCache[variableName] = getComputedStyle(document.documentElement).getPropertyValue(variableName);
+    }
+    return cssVarCache[variableName];
   }
 
   // Canvas needs rgba() for the translucent crosshair, and the trace colours
   // arrive as hex from CSS.
-  function withAlpha(hex, a){
-    let h = hex.trim().replace("#","");
-    if(h.length === 3) h = h.split("").map(c => c+c).join("");
-    const n = parseInt(h, 16);
-    return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+  function withAlpha(hexColor, alpha) {
+    let hex = hexColor.trim().replace("#", "");
+    if (hex.length === 3) {
+      hex = hex.split("").map(digit => digit + digit).join("");
+    }
+    const rgbInt = parseInt(hex, 16);
+    return `rgba(${(rgbInt >> 16) & 255},${(rgbInt >> 8) & 255},${rgbInt & 255},${alpha})`;
   }
 
   // Pick a gridline step that respects the scope's ideal step (minimum) but
   // scales up through nice human-readable values so we never crowd the axis
   // with more than ~6 divisions.
-  const STEP_CASCADE = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
-  function niceStep(top, ideal){
-    for(const s of STEP_CASCADE){
-      if(s >= ideal && top/s <= 6) return s;
+  const GRID_STEP_CASCADE = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+  const MAX_GRID_DIVISIONS = 6;
+  function pickGridStep(axisTop, minimumStep) {
+    for (const candidateStep of GRID_STEP_CASCADE) {
+      if (candidateStep >= minimumStep && axisTop / candidateStep <= MAX_GRID_DIVISIONS) {
+        return candidateStep;
+      }
     }
-    return STEP_CASCADE[STEP_CASCADE.length-1];
+    return GRID_STEP_CASCADE[GRID_STEP_CASCADE.length - 1];
   }
 
-  function makeScope(opts){
-    const cv = $(opts.canvas), ctx = cv.getContext("2d"), rngEl = $(opts.rng);
-    // Each point is {t: Date, v: number}. Chronological order is preserved
-    // by construction (Publish is single-writer server-side, history arrives
-    // sorted, live samples arrive newest-last).
-    let hist = [];
-    let hoverIdx = -1;
-    let W=0, H=0;
+  // ---- Scope (one strip chart) -------------------------------------------
+  const PLOT_BOTTOM_PADDING_PX = 14; // room under the plot for axis labels
+  const AXIS_HEADROOM = 1.25; // top of scale sits 25% above the peak
+  const HOVER_SNAP_PX = 8; // how close the cursor must be to snap to a point
+  const LEADING_DOT_RADIUS_PX = 2.6;
+  const HOVER_DOT_RADIUS_PX = 3.2;
+  const HOVER_RING_RADIUS_PX = 5.5;
 
-    const fmtVal = opts.fmtVal || (v => `${Math.round(v)} ${opts.unit}`);
+  const amber = getCssVar("--amber").trim();
+  const CROSSHAIR_LINE_COLOR = withAlpha(amber, 0.35);
+  const CROSSHAIR_RING_COLOR = withAlpha(amber, 0.45);
 
-    // Badge lives inside the scope's own container so it's clipped correctly.
-    const badge = document.createElement("div");
-    badge.className = "badge";
-    cv.parentElement.appendChild(badge);
-    badge.style.setProperty("--badge-fg", getCSS(opts.color).trim());
+  function createScope(config) {
+    const canvas = byId(config.canvasId);
+    const canvasCtx = canvas.getContext("2d");
+    const rangeLabelEl = byId(config.rangeLabelId);
+    // Each point is {time: Date, value: number}. Chronological order is
+    // preserved by construction (the hub is single-writer server-side, history
+    // arrives sorted, live samples arrive newest-last).
+    let points = [];
+    let hoveredIndex = -1;
+    let widthPx = 0;
+    let heightPx = 0;
 
-    function resize(){
-      const dpr = window.devicePixelRatio || 1;
-      const r = cv.getBoundingClientRect();
-      W = r.width; H = r.height;
-      cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
-      ctx.setTransform(dpr,0,0,dpr,0,0);
+    const formatValue = config.formatValue || (value => `${Math.round(value)} ${config.unit}`);
+
+    // The badge lives inside the scope's own container so it's clipped correctly.
+    const hoverBadge = document.createElement("div");
+    hoverBadge.className = "hover-badge";
+    canvas.parentElement.appendChild(hoverBadge);
+    hoverBadge.style.setProperty("--badge-fg", getCssVar(config.colorVar).trim());
+
+    function resizeCanvas() {
+      const pixelRatio = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      widthPx = rect.width;
+      heightPx = rect.height;
+      canvas.width = Math.round(widthPx * pixelRatio);
+      canvas.height = Math.round(heightPx * pixelRatio);
+      canvasCtx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       draw();
     }
 
@@ -118,346 +160,475 @@
     // shift()-ing in a loop, and pruning by time rather than by count means
     // a long range keeps its full history no matter how many live samples
     // arrive on top of it.
-    function prune(tStart){
-      if(hist.length > 1 && hist[0].t < tStart){
-        let i = 0;
-        while(i < hist.length && hist[i].t < tStart) i++;
-        if(i > 0) i--;              // keep one point off-screen so the trace enters from the edge
-        if(i > 0){ hist = hist.slice(i); hoverIdx -= i; }
+    function dropPointsBefore(windowStartMs) {
+      if (points.length > 1 && points[0].time < windowStartMs) {
+        let firstVisibleIndex = 0;
+        while (firstVisibleIndex < points.length && points[firstVisibleIndex].time < windowStartMs) {
+          firstVisibleIndex++;
+        }
+        // Keep one point off-screen so the trace enters from the edge.
+        if (firstVisibleIndex > 0) firstVisibleIndex--;
+        if (firstVisibleIndex > 0) {
+          points = points.slice(firstVisibleIndex);
+          hoveredIndex -= firstVisibleIndex;
+        }
       }
-      if(hist.length > MAXPTS){
-        const drop = hist.length - MAXPTS;
-        hist = hist.slice(drop); hoverIdx -= drop;
+      if (points.length > MAX_POINTS_PER_SCOPE) {
+        const excess = points.length - MAX_POINTS_PER_SCOPE;
+        points = points.slice(excess);
+        hoveredIndex -= excess;
       }
-      if(hoverIdx < 0) hoverIdx = -1;
+      if (hoveredIndex < 0) hoveredIndex = -1;
     }
 
-    function draw(){
-      ctx.clearRect(0,0,W,H);
-      if(!W) return;
+    function draw() {
+      canvasCtx.clearRect(0, 0, widthPx, heightPx);
+      if (!widthPx) return;
 
-      const tEnd   = Date.now();
-      const tStart = viewStart(tEnd);
-      const span   = Math.max(1, tEnd - tStart);
-      const xOf = t => W * (t - tStart) / span;
+      const nowMs = Date.now();
+      const windowStartMs = viewWindowStartMs(nowMs);
+      const windowSpanMs = Math.max(1, nowMs - windowStartMs);
+      const xForTime = timeMs => (widthPx * (timeMs - windowStartMs)) / windowSpanMs;
 
-      prune(tStart);
+      dropPointsBefore(windowStartMs);
 
       // Peak over visible samples only — a spike from the far end of the
       // window shouldn't dictate the scale after it scrolls off.
-      let peak = 0, visibleCount = 0;
-      for(let i=0;i<hist.length;i++){
-        const p = hist[i];
-        if(p.t < tStart) continue;
-        visibleCount++;
-        if(p.v > peak) peak = p.v;
+      let peakValue = 0;
+      let visiblePointCount = 0;
+      for (const point of points) {
+        if (point.time < windowStartMs) continue;
+        visiblePointCount++;
+        if (point.value > peakValue) peakValue = point.value;
       }
-      const top = Math.max(opts.floor, Math.ceil(Math.max(peak,0)*1.25/opts.gran)*opts.gran);
-      rngEl.textContent = visibleCount ? `0–${top} ${opts.unit} · ${view.range.label}` : `${view.range.label} span`;
-      const plotH = H - 14;
-      const trace = getCSS(opts.color).trim();
-      const yOf = v => plotH * (1 - Math.min(v,top)/top);
+      const axisTop = Math.max(
+        config.minAxisTop,
+        Math.ceil((Math.max(peakValue, 0) * AXIS_HEADROOM) / config.axisRounding) * config.axisRounding,
+      );
+      rangeLabelEl.textContent = visiblePointCount
+        ? `0–${axisTop} ${config.unit} · ${viewWindow.selectedRange.label}`
+        : `${viewWindow.selectedRange.label} span`;
+      const plotHeight = heightPx - PLOT_BOTTOM_PADDING_PX;
+      const traceColor = getCssVar(config.colorVar).trim();
+      const yForValue = value => plotHeight * (1 - Math.min(value, axisTop) / axisTop);
 
       // Grid
-      ctx.strokeStyle = getCSS("--grid"); ctx.lineWidth = 1;
-      ctx.font = "10px " + getCSS("--mono").trim();
-      ctx.fillStyle = getCSS("--label-dim");
-      const step = opts.step ? niceStep(top, opts.step) : top/4;
-      const divisions = Math.max(1, Math.round(top/step));
-      for(let i=0;i<=divisions;i++){
-        const y = Math.round(plotH*i/divisions) + 0.5;
-        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
-        const val = Math.round(top - i*step);
-        ctx.fillText(String(val), 2, (y-3<8) ? y+11 : y-3);
+      canvasCtx.strokeStyle = getCssVar("--grid");
+      canvasCtx.lineWidth = 1;
+      canvasCtx.font = "10px " + getCssVar("--mono").trim();
+      canvasCtx.fillStyle = getCssVar("--label-dim");
+      const gridStep = config.minGridStep ? pickGridStep(axisTop, config.minGridStep) : axisTop / 4;
+      const gridDivisions = Math.max(1, Math.round(axisTop / gridStep));
+      for (let division = 0; division <= gridDivisions; division++) {
+        const gridLineY = Math.round((plotHeight * division) / gridDivisions) + 0.5;
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(0, gridLineY);
+        canvasCtx.lineTo(widthPx, gridLineY);
+        canvasCtx.stroke();
+        const gridValue = Math.round(axisTop - division * gridStep);
+        canvasCtx.fillText(String(gridValue), 2, gridLineY - 3 < 8 ? gridLineY + 11 : gridLineY - 3);
       }
-      if(visibleCount < 1) return;
+      if (visiblePointCount < 1) return;
 
       // Split visible samples into contiguous segments, breaking anywhere
-      // consecutive readings are more than view.gapMs apart. Each segment
-      // gets its own fill + stroke so offline periods render as blank space.
-      // The threshold tracks the server's bucket width — at 24h the points
-      // are ~40s apart by design, and a fixed 3s gap would shred the trace.
+      // consecutive readings are more than viewWindow.gapThresholdMs apart. Each
+      // segment gets its own fill + stroke so offline periods render as blank
+      // space. The threshold tracks the server's bucket width — at 24h the
+      // points are ~40s apart by design, and a fixed 3s gap would shred the trace.
       const segments = [];
-      let cur = [];
-      for(let i=0;i<hist.length;i++){
-        const p = hist[i];
-        if(p.t < tStart) continue;
-        if(cur.length > 0 && p.t - cur[cur.length-1].t > view.gapMs){
-          segments.push(cur); cur = [];
+      let currentSegment = [];
+      for (const point of points) {
+        if (point.time < windowStartMs) continue;
+        const previousPoint = currentSegment[currentSegment.length - 1];
+        if (previousPoint && point.time - previousPoint.time > viewWindow.gapThresholdMs) {
+          segments.push(currentSegment);
+          currentSegment = [];
         }
-        cur.push(p);
+        currentSegment.push(point);
       }
-      if(cur.length > 0) segments.push(cur);
+      if (currentSegment.length > 0) segments.push(currentSegment);
 
-      for(const seg of segments){
+      for (const segment of segments) {
         // Fill under
-        ctx.beginPath();
-        ctx.moveTo(xOf(seg[0].t), plotH);
-        for(const p of seg) ctx.lineTo(xOf(p.t), yOf(p.v));
-        ctx.lineTo(xOf(seg[seg.length-1].t), plotH);
-        ctx.closePath();
-        // Trace
-        ctx.beginPath();
-        for(let j=0;j<seg.length;j++){
-          const x = xOf(seg[j].t), y = yOf(seg[j].v);
-          j ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(xForTime(segment[0].time), plotHeight);
+        for (const point of segment) {
+          canvasCtx.lineTo(xForTime(point.time), yForValue(point.value));
         }
-        ctx.strokeStyle = trace; ctx.lineWidth = 1; ctx.lineJoin = "round"; ctx.stroke();
+        canvasCtx.lineTo(xForTime(segment[segment.length - 1].time), plotHeight);
+        canvasCtx.closePath();
+        canvasCtx.fillStyle = withAlpha(traceColor, traceFillOpacity);
+        canvasCtx.fill();
+        // Trace
+        canvasCtx.beginPath();
+        for (let pointIndex = 0; pointIndex < segment.length; pointIndex++) {
+          const pointX = xForTime(segment[pointIndex].time);
+          const pointY = yForValue(segment[pointIndex].value);
+          pointIndex ? canvasCtx.lineTo(pointX, pointY) : canvasCtx.moveTo(pointX, pointY);
+        }
+        canvasCtx.strokeStyle = traceColor;
+        canvasCtx.lineWidth = 1;
+        canvasCtx.lineJoin = "round";
+        canvasCtx.stroke();
       }
 
       // Leading dot on the most recent visible sample
-      const last = hist[hist.length-1];
-      if(last && last.t >= tStart){
-        const lx = xOf(last.t), ly = yOf(last.v);
-        ctx.beginPath(); ctx.arc(lx,ly,2.6,0,Math.PI*2); ctx.fillStyle=trace; ctx.fill();
+      const newestPoint = points[points.length - 1];
+      if (newestPoint && newestPoint.time >= windowStartMs) {
+        const dotX = xForTime(newestPoint.time);
+        const dotY = yForValue(newestPoint.value);
+        canvasCtx.beginPath();
+        canvasCtx.arc(dotX, dotY, LEADING_DOT_RADIUS_PX, 0, Math.PI * 2);
+        canvasCtx.fillStyle = traceColor;
+        canvasCtx.fill();
       }
 
       // Hover crosshair
-      if(hoverIdx >= 0 && hoverIdx < hist.length){
-        const p = hist[hoverIdx];
-        if(p.t >= tStart){
-          const hx = xOf(p.t), hy = yOf(p.v);
-          ctx.strokeStyle = "rgba(245,183,64,.35)"; ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(Math.round(hx)+0.5, 0); ctx.lineTo(Math.round(hx)+0.5, plotH); ctx.stroke();
-          ctx.beginPath(); ctx.arc(hx, hy, 3.2, 0, Math.PI*2); ctx.fillStyle = trace; ctx.fill();
-          ctx.beginPath(); ctx.arc(hx, hy, 5.5, 0, Math.PI*2);
-          ctx.strokeStyle = "rgba(245,183,64,.45)"; ctx.lineWidth = 1; ctx.stroke();
+      if (hoveredIndex >= 0 && hoveredIndex < points.length) {
+        const hoveredPoint = points[hoveredIndex];
+        if (hoveredPoint.time >= windowStartMs) {
+          const crosshairX = xForTime(hoveredPoint.time);
+          const crosshairY = yForValue(hoveredPoint.value);
+          canvasCtx.strokeStyle = CROSSHAIR_LINE_COLOR;
+          canvasCtx.lineWidth = 1;
+          canvasCtx.beginPath();
+          canvasCtx.moveTo(Math.round(crosshairX) + 0.5, 0);
+          canvasCtx.lineTo(Math.round(crosshairX) + 0.5, plotHeight);
+          canvasCtx.stroke();
+          canvasCtx.beginPath();
+          canvasCtx.arc(crosshairX, crosshairY, HOVER_DOT_RADIUS_PX, 0, Math.PI * 2);
+          canvasCtx.fillStyle = traceColor;
+          canvasCtx.fill();
+          canvasCtx.beginPath();
+          canvasCtx.arc(crosshairX, crosshairY, HOVER_RING_RADIUS_PX, 0, Math.PI * 2);
+          canvasCtx.strokeStyle = CROSSHAIR_RING_COLOR;
+          canvasCtx.lineWidth = 1;
+          canvasCtx.stroke();
         }
       }
     }
 
-    // pushSilent: append without redrawing. Used when loading a range so we
-    // can insert a couple thousand points without repainting once per point.
+    // addPointSilently appends without redrawing. Used when loading a range so
+    // we can insert a couple thousand points without repainting once per point.
     // Caller must invoke draw() when the batch is done.
-    function pushSilent(t, v){
-      hist.push({t, v});
+    function addPointSilently(time, value) {
+      points.push({ time, value });
     }
-    function push(t, v){
-      pushSilent(t, v);
-      if(hoverIdx >= 0 && lastMouseX !== null) hoverIdx = idxAtX(lastMouseX);
+    function addPoint(time, value) {
+      addPointSilently(time, value);
+      if (hoveredIndex >= 0 && lastMouseX !== null) {
+        hoveredIndex = nearestPointIndexAtX(lastMouseX);
+      }
       draw();
-      if(hoverIdx >= 0) updateBadge();
+      if (hoveredIndex >= 0) updateHoverBadge();
     }
-    function clear(){
-      hist = [];
-      hoverIdx = -1;
-      badge.classList.remove("on");
+    function clearPoints() {
+      points = [];
+      hoveredIndex = -1;
+      hoverBadge.classList.remove("is-visible");
     }
 
     // Binary search for the sample closest in TIME to the pixel x. Then
     // gate on pixel distance so hovering in the middle of a big gap doesn't
     // snap onto a distant sample from the far side of the gap.
-    function idxAtX(px){
-      if(hist.length < 1) return -1;
-      const tEnd   = Date.now();
-      const tStart = viewStart(tEnd);
-      const span   = Math.max(1, tEnd - tStart);
-      const tTarget = tStart + (px/W) * span;
+    function nearestPointIndexAtX(pixelX) {
+      if (points.length < 1) return -1;
+      const nowMs = Date.now();
+      const windowStartMs = viewWindowStartMs(nowMs);
+      const windowSpanMs = Math.max(1, nowMs - windowStartMs);
+      const targetTimeMs = windowStartMs + (pixelX / widthPx) * windowSpanMs;
 
-      let lo = 0, hi = hist.length - 1;
-      while(lo < hi){
-        const mid = (lo + hi) >> 1;
-        if(hist[mid].t < tTarget) lo = mid + 1; else hi = mid;
+      let low = 0;
+      let high = points.length - 1;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (points[middle].time < targetTimeMs) low = middle + 1;
+        else high = middle;
       }
-      let idx = lo;
-      if(lo > 0 && Math.abs(hist[lo-1].t - tTarget) < Math.abs(hist[lo].t - tTarget)){
-        idx = lo - 1;
+      let nearestIndex = low;
+      if (low > 0 && Math.abs(points[low - 1].time - targetTimeMs) < Math.abs(points[low].time - targetTimeMs)) {
+        nearestIndex = low - 1;
       }
-      if(hist[idx].t < tStart) return -1;
-      // Snap only if within ~8px of the nearest sample.
-      const sampleX = W * (hist[idx].t - tStart) / span;
-      if(Math.abs(sampleX - px) > 8) return -1;
-      return idx;
+      if (points[nearestIndex].time < windowStartMs) return -1;
+      // Snap only if the cursor is within HOVER_SNAP_PX of the nearest sample.
+      const pointX = (widthPx * (points[nearestIndex].time - windowStartMs)) / windowSpanMs;
+      if (Math.abs(pointX - pixelX) > HOVER_SNAP_PX) return -1;
+      return nearestIndex;
     }
 
-    function updateBadge(){
-      if(hoverIdx < 0 || hoverIdx >= hist.length){ badge.classList.remove("on"); return; }
-      const p = hist[hoverIdx];
-      const tEnd   = Date.now();
-      const tStart = viewStart(tEnd);
-      const span   = Math.max(1, tEnd - tStart);
-      const hx = W * (p.t - tStart) / span;
+    function updateHoverBadge() {
+      if (hoveredIndex < 0 || hoveredIndex >= points.length) {
+        hoverBadge.classList.remove("is-visible");
+        return;
+      }
+      const hoveredPoint = points[hoveredIndex];
+      const nowMs = Date.now();
+      const windowStartMs = viewWindowStartMs(nowMs);
+      const windowSpanMs = Math.max(1, nowMs - windowStartMs);
+      const pointX = (widthPx * (hoveredPoint.time - windowStartMs)) / windowSpanMs;
 
-      const bx = cv.offsetLeft + hx;
-      const by = cv.offsetTop;
-      badge.style.left = bx + "px";
-      badge.style.top  = by + "px";
+      hoverBadge.style.left = canvas.offsetLeft + pointX + "px";
+      hoverBadge.style.top = canvas.offsetTop + "px";
 
-      const ts = p.t;
-      const hh = String(ts.getHours()).padStart(2,"0");
-      const mm = String(ts.getMinutes()).padStart(2,"0");
-      const ss = String(ts.getSeconds()).padStart(2,"0");
-      badge.innerHTML = `${fmtVal(p.v)}<span class="t">${hh}:${mm}:${ss}</span>`;
-      badge.classList.add("on");
+      const pointTime = hoveredPoint.time;
+      const hours = String(pointTime.getHours()).padStart(2, "0");
+      const minutes = String(pointTime.getMinutes()).padStart(2, "0");
+      const seconds = String(pointTime.getSeconds()).padStart(2, "0");
+      hoverBadge.innerHTML = `${formatValue(hoveredPoint.value)}` + `<span class="hover-badge-time">${hours}:${minutes}:${seconds}</span>`;
+      hoverBadge.classList.add("is-visible");
     }
 
     let lastMouseX = null;
-    cv.addEventListener("mousemove", e => {
-      const r = cv.getBoundingClientRect();
-      lastMouseX = e.clientX - r.left;
-      const newIdx = idxAtX(lastMouseX);
-      if(newIdx !== hoverIdx){ hoverIdx = newIdx; draw(); }
-      updateBadge();
+    canvas.addEventListener("mousemove", event => {
+      const rect = canvas.getBoundingClientRect();
+      lastMouseX = event.clientX - rect.left;
+      const newHoveredIndex = nearestPointIndexAtX(lastMouseX);
+      if (newHoveredIndex !== hoveredIndex) {
+        hoveredIndex = newHoveredIndex;
+        draw();
+      }
+      updateHoverBadge();
     });
-    cv.addEventListener("mouseleave", () => {
+    canvas.addEventListener("mouseleave", () => {
       lastMouseX = null;
-      hoverIdx = -1;
-      badge.classList.remove("on");
+      hoveredIndex = -1;
+      hoverBadge.classList.remove("is-visible");
       draw();
     });
 
-    return {resize, draw, push, pushSilent, clear};
+    return { resizeCanvas, draw, addPoint, addPointSilently, clearPoints };
   }
 
-  const fmtMs   = v => `${Math.round(v)} ms`;
-  const fmtPct  = v => `${v.toFixed(2)} %`;
-  const fmtMbps = v => `${v.toFixed(1)} Mbps`;
+  const formatMs = value => `${Math.round(value)} ms`;
+  const formatPercent = value => `${value.toFixed(2)} %`;
+  const formatMbps = value => `${value.toFixed(1)} Mbps`;
 
-  const latScope  = makeScope({canvas:"sc-lat",  rng:"rng-lat",  unit:"ms",   floor:60,  gran:20,  color:"--sc-lat",  fmtVal: fmtMs});
-  const lossScope = makeScope({canvas:"sc-loss", rng:"rng-loss", unit:"%",    floor:5,   gran:5,   step:1, color:"--sc-loss", fmtVal: fmtPct});
-  const downScope = makeScope({canvas:"sc-down", rng:"rng-down", unit:"Mbps", floor:100, gran:100, color:"--sc-down", fmtVal: fmtMbps});
-  const upScope   = makeScope({canvas:"sc-up",   rng:"rng-up",   unit:"Mbps", floor:20,  gran:20,  color:"--sc-up",   fmtVal: fmtMbps});
-  const scopes = [latScope, lossScope, downScope, upScope];
+  const latencyScope = createScope({
+    canvasId: "chart-latency",
+    rangeLabelId: "chart-range-latency",
+    unit: "ms",
+    minAxisTop: 60,
+    axisRounding: 20,
+    colorVar: "--chart-latency",
+    formatValue: formatMs,
+  });
+  const packetLossScope = createScope({
+    canvasId: "chart-packet-loss",
+    rangeLabelId: "chart-range-packet-loss",
+    unit: "%",
+    minAxisTop: 5,
+    axisRounding: 5,
+    minGridStep: 1,
+    colorVar: "--chart-packet-loss",
+    formatValue: formatPercent,
+  });
+  const downloadScope = createScope({
+    canvasId: "chart-download",
+    rangeLabelId: "chart-range-download",
+    unit: "Mbps",
+    minAxisTop: 100,
+    axisRounding: 100,
+    colorVar: "--chart-download",
+    formatValue: formatMbps,
+  });
+  const uploadScope = createScope({
+    canvasId: "chart-upload",
+    rangeLabelId: "chart-range-upload",
+    unit: "Mbps",
+    minAxisTop: 20,
+    axisRounding: 20,
+    colorVar: "--chart-upload",
+    formatValue: formatMbps,
+  });
+  const scopes = [latencyScope, packetLossScope, downloadScope, uploadScope];
 
   // ---- Applying samples --------------------------------------------------
-  // updateReadouts sets the current-state UI (alarm strip, tiles, GET clock).
+  // updateReadouts sets the current-state UI (alarm strip, tiles, uptime clock).
   // chartSample only pushes to the strip charts. Splitting the two lets a
   // range load push thousands of points silently without doing thousands of
-  // pointless UI updates — and keeps decimated worst-case buckets out of the
+  // pointless UI updates — and keeps downsampled worst-case buckets out of the
   // readouts, which must always show the genuine latest reading.
-  function updateReadouts(s){
-    setState(s.link);
-    $("v-lat").textContent  = fmt(s.latency_ms,0);
-    $("v-down").textContent = fmt(s.downlink_mbps,1);
-    $("v-up").textContent   = fmt(s.uplink_mbps,1);
-    const dropPct = (s.drop_rate||0)*100;
-    $("v-drop").textContent = fmt(dropPct,1);
+  const LATENCY_HOT_MS = 100;
+  const LATENCY_WARM_MS = 70;
+  const DROP_HOT_PERCENT = 5;
+  const DROP_WARM_PERCENT = 0.5;
 
-    $("c-lat").className  = "cell" + (s.latency_ms>100 ? " hot" : s.latency_ms>70 ? " warm" : "");
-    $("c-drop").className = "cell" + (dropPct>5 ? " hot" : dropPct>0.5 ? " warm" : "");
+  function updateReadouts(sample) {
+    setLinkState(sample.link_state);
+    byId("value-latency").textContent = formatNumber(sample.latency_ms, 0);
+    byId("value-download").textContent = formatNumber(sample.download_mbps, 1);
+    byId("value-upload").textContent = formatNumber(sample.upload_mbps, 1);
+    const dropPercent = (sample.drop_rate_fraction || 0) * 100;
+    byId("value-packet-loss").textContent = formatNumber(dropPercent, 1);
 
-    const offline = s.link === "OFFLINE";
-    $("v-obs-state").textContent = offline ? "—" : (s.obstructed ? "OBSTRUCTED" : "CLEAR");
-    $("v-obs").className = "v row " + (offline ? "" : s.obstructed ? "alarm" : "go");
-    $("v-obs-pct").textContent = offline ? "" : fmt((s.obstruction_fraction||0)*100, 2) + "% obstruction";
+    byId("cell-latency").className =
+      "cell" +
+      (sample.latency_ms > LATENCY_HOT_MS
+        ? " is-critical"
+        : sample.latency_ms > LATENCY_WARM_MS
+          ? " is-caution"
+          : "");
+    byId("cell-packet-loss").className =
+      "cell" +
+      (dropPercent > DROP_HOT_PERCENT
+        ? " is-critical"
+        : dropPercent > DROP_WARM_PERCENT
+          ? " is-caution"
+          : "");
 
-    if(s.hardware_version) $("v-hw").textContent = s.hardware_version;
-    if(s.software_version) $("v-sw").textContent = s.software_version;
-    $("get").textContent = get(s.uptime_seconds);
-    $("v-seen").textContent = s.timestamp
-      ? new Date(s.timestamp).toLocaleTimeString()
+    const isOffline = sample.link_state === "OFFLINE";
+    byId("line-of-sight-state").textContent = isOffline
+      ? "—"
+      : sample.obstructed
+        ? "OBSTRUCTED"
+        : "CLEAR";
+    byId("line-of-sight").className =
+      "status-value is-row " + (isOffline ? "" : sample.obstructed ? "is-alarm" : "is-nominal");
+    byId("line-of-sight-percent").textContent = isOffline
+      ? ""
+      : formatNumber((sample.obstruction_fraction || 0) * 100, 2) + "% obstruction";
+
+    if (sample.hardware_version) byId("hardware-version").textContent = sample.hardware_version;
+    if (sample.software_version) byId("software-version").textContent = sample.software_version;
+    byId("uptime-clock").textContent = formatUptimeClock(sample.uptime_seconds);
+    byId("last-contact").textContent = sample.timestamp
+      ? new Date(sample.timestamp).toLocaleTimeString()
       : new Date().toLocaleTimeString();
   }
 
-  function chartSample(s, silent){
-    if(s.link === "OFFLINE") return;
-    const t = s.timestamp ? new Date(s.timestamp) : new Date();
-    const dropPct = (s.drop_rate||0)*100;
-    const method = silent ? "pushSilent" : "push";
-    lossScope[method](t, dropPct);
-    downScope[method](t, s.downlink_mbps||0);
-    upScope[method](t, s.uplink_mbps||0);
-    if(s.latency_ms>0) latScope[method](t, s.latency_ms);
+  function chartSample(sample, silent) {
+    if (sample.link_state === "OFFLINE") return;
+    const timestamp = sample.timestamp ? new Date(sample.timestamp) : new Date();
+    const dropPercent = (sample.drop_rate_fraction || 0) * 100;
+    const addMethod = silent ? "addPointSilently" : "addPoint";
+    packetLossScope[addMethod](timestamp, dropPercent);
+    downloadScope[addMethod](timestamp, sample.download_mbps || 0);
+    uploadScope[addMethod](timestamp, sample.upload_mbps || 0);
+    if (sample.latency_ms > 0) latencyScope[addMethod](timestamp, sample.latency_ms);
   }
 
-  function applyLive(s){ updateReadouts(s); chartSample(s, false); }
+  function applyLiveSample(sample) {
+    updateReadouts(sample);
+    chartSample(sample, false);
+  }
 
   // ---- Range selector ----------------------------------------------------
-  const rangeBar = $("ranges");
+  const rangeBarEl = byId("range-bar");
 
-  function buildRangeBar(){
-    for(const r of RANGES){
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "range";
-      b.dataset.id = r.id;
-      b.textContent = r.label;
-      b.addEventListener("click", () => selectRange(r.id));
-      rangeBar.appendChild(b);
+  function buildRangeBar() {
+    for (const rangeOption of RANGES) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "range-button";
+      button.dataset.id = rangeOption.id;
+      button.textContent = rangeOption.label;
+      button.addEventListener("click", () => selectRange(rangeOption.id));
+      rangeBarEl.appendChild(button);
     }
   }
 
-  function markActive(id){
-    for(const b of rangeBar.children){
-      const on = b.dataset.id === id;
-      b.classList.toggle("on", on);
-      b.setAttribute("aria-pressed", String(on));
+  function markActiveRange(activeRangeId) {
+    for (const button of rangeBarEl.children) {
+      const isActive = button.dataset.id === activeRangeId;
+      button.classList.toggle("is-selected", isActive);
+      button.setAttribute("aria-pressed", String(isActive));
     }
   }
 
   // Guards against out-of-order responses: mash 24h then 2m and the slow 24h
   // reply must not overwrite the fast one.
-  let loadToken = 0;
+  let latestRangeLoadToken = 0;
 
-  async function selectRange(id){
-    const r = RANGES.find(x => x.id === id);
-    if(!r) return;
-    const token = ++loadToken;
+  async function selectRange(rangeId) {
+    const selectedRange = RANGES.find(range => range.id === rangeId);
+    if (!selectedRange) return;
+    const loadToken = ++latestRangeLoadToken;
 
-    view.range = r;
-    view.startMs = null;
-    markActive(r.id);
-    rangeBar.classList.add("loading");
+    viewWindow.selectedRange = selectedRange;
+    viewWindow.pinnedStartMs = null;
+    markActiveRange(selectedRange.id);
+    rangeBarEl.classList.add("is-loading");
 
-    try{
-      const res = await fetch(`/history?range=${encodeURIComponent(r.id)}`, {cache:"no-store"});
-      if(!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      const data = await res.json();
-      if(token !== loadToken) return; // superseded by a later click
+    try {
+      const response = await fetch(`/history?range=${encodeURIComponent(selectedRange.id)}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      const payload = await response.json();
+      if (loadToken !== latestRangeLoadToken) return; // superseded by a later click
 
-      const pts = Array.isArray(data.samples) ? data.samples : [];
+      const samples = Array.isArray(payload.samples) ? payload.samples : [];
 
-      // Trace-breaking threshold follows the server's bucket width, with a
-      // 2.5x allowance for jitter and the occasional dropped poll.
-      view.gapMs = Math.max(3000, (data.bucket_ms || 1000) * 2.5);
+      // Trace-breaking threshold follows the server's bucket width, with
+      // slack for jitter and the occasional dropped poll.
+      viewWindow.gapThresholdMs = Math.max(MIN_GAP_THRESHOLD_MS, (payload.bucket_width_ms || ASSUMED_BUCKET_MS) * GAP_THRESHOLD_MULTIPLIER);
 
-      if(r.ms === null){
-        view.startMs = pts.length
-          ? new Date(pts[0].timestamp).getTime()
-          : Date.now() - 60*1000;
+      if (selectedRange.spanMs === null) {
+        viewWindow.pinnedStartMs = samples.length ? new Date(samples[0].timestamp).getTime() : Date.now() - EMPTY_ALL_RANGE_SPAN_MS;
       }
 
-      scopes.forEach(sc => sc.clear());
-      for(const s of pts) chartSample(s, true);
-      scopes.forEach(sc => sc.draw());
-    }catch(err){
-      if(token === loadToken) console.error("could not load range", r.id, err);
-    }finally{
-      if(token === loadToken) rangeBar.classList.remove("loading");
+      scopes.forEach(scope => scope.clearPoints());
+      for (const sample of samples) chartSample(sample, true);
+      scopes.forEach(scope => scope.draw());
+    } catch (loadError) {
+      if (loadToken === latestRangeLoadToken) {
+        console.error("could not load range", selectedRange.id, loadError);
+      }
+    } finally {
+      if (loadToken === latestRangeLoadToken) rangeBarEl.classList.remove("is-loading");
     }
   }
 
   // ---- Live stream -------------------------------------------------------
-  function connect(){
-    const es = new EventSource("/events");
-    es.onopen  = () => { conn.className="conn live"; connTxt.textContent="Telemetry live"; };
+  function connectToTelemetryStream() {
+    const eventSource = new EventSource("/events");
+    eventSource.onopen = () => {
+      connectionIndicator.className = "connection-status is-live";
+      connectionText.textContent = "Telemetry live";
+    };
     // The hub's backfill is no longer the charts' data source — /history owns
     // that — so we only take the newest sample from it to prime the readouts.
-    es.addEventListener("backfill", e => {
-      try{
-        const arr = JSON.parse(e.data);
-        if(Array.isArray(arr) && arr.length) updateReadouts(arr[arr.length-1]);
-      }catch(_){}
+    eventSource.addEventListener("backfill", event => {
+      try {
+        const backfillSamples = JSON.parse(event.data);
+        if (Array.isArray(backfillSamples) && backfillSamples.length) {
+          updateReadouts(backfillSamples[backfillSamples.length - 1]);
+        }
+      } catch {}
     });
-    es.onmessage = e => { try{ applyLive(JSON.parse(e.data)); }catch(_){} };
-    es.onerror   = () => { conn.className="conn lost"; connTxt.textContent="Reacquiring…"; setState("OFFLINE"); };
+    eventSource.onmessage = event => {
+      try {
+        applyLiveSample(JSON.parse(event.data));
+      } catch {}
+    };
+    eventSource.onerror = () => {
+      connectionIndicator.className = "connection-status is-lost";
+      connectionText.textContent = "Reacquiring…";
+      setLinkState("OFFLINE");
+    };
   }
 
   // Repaint once per second even without new data, so the strip keeps
   // advancing to keep "now" at the right edge — otherwise a disconnected
   // client would show a frozen chart with the last sample stuck on the right.
-  setInterval(() => scopes.forEach(sc => sc.draw()), 1000);
+  const REPAINT_INTERVAL_MS = 1000;
+  setInterval(() => scopes.forEach(scope => scope.draw()), REPAINT_INTERVAL_MS);
 
-  // On a long range, live 1 Hz samples pile onto a decimated series and the
+  // On a long range, live 1 Hz samples pile onto a downsampled series and the
   // right-hand end slowly gets denser than the rest. Re-pulling occasionally
-  // re-buckets it. Harmless to delete if the reload flicker bothers you.
+  // re-buckets it. Might cause reload flicker
+  const REBUCKET_INTERVAL_MS = 5 * 60 * 1000;
+  const REBUCKET_RANGES_LONGER_THAN_MS = 15 * 60 * 1000;
   setInterval(() => {
-    if(view.range.ms === null || view.range.ms > 15*60*1000) selectRange(view.range.id);
-  }, 5*60*1000);
+    const spanMs = viewWindow.selectedRange.spanMs;
+    if (spanMs === null || spanMs > REBUCKET_RANGES_LONGER_THAN_MS) {
+      selectRange(viewWindow.selectedRange.id);
+    }
+  }, REBUCKET_INTERVAL_MS);
 
-  window.addEventListener("resize", () => scopes.forEach(s => s.resize()));
+  window.addEventListener("resize", () => scopes.forEach(scope => scope.resizeCanvas()));
   buildRangeBar();
-  scopes.forEach(s => s.resize());
-  connect();
-  selectRange(DEFAULT_RANGE);
+  scopes.forEach(scope => scope.resizeCanvas());
+  connectToTelemetryStream();
+  selectRange(DEFAULT_RANGE_ID);
 })();
