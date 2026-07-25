@@ -433,8 +433,8 @@
     canvasId: "chart-download",
     rangeLabelId: "chart-range-download",
     unit: "Mbps",
-    minAxisTop: 5,
-    axisRounding: 10,
+    minAxisTop: 100,
+    axisRounding: 100,
     colorVar: "--chart-download",
     formatValue: formatMbps,
   });
