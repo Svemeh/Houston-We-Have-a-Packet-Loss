@@ -11,25 +11,25 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", DefaultDishAddress, "Starlink dish gRPC address")
-	webAddr := flag.String("web", DefaultWebAddr, "dashboard listen address")
-	logPath := flag.String("log", DefaultLogFile, "telemetry log file (JSONL)")
-	check := flag.Bool("oneshot", false, "run a one-shot connectivity check and exit")
-	timeout := flag.Duration("timeout", DefaultDialTimeout, "per-request timeout")
+	dishAddress := flag.String("addr", DefaultDishAddress, "Starlink dish gRPC address")
+	webListenAddress := flag.String("web", DefaultWebAddress, "dashboard listen address")
+	logPath := flag.String("log", DefaultLogFilePath, "telemetry log file (JSONL)")
+	oneShot := flag.Bool("oneshot", false, "run a one-shot connectivity check and exit")
+	requestTimeout := flag.Duration("timeout", DefaultRequestTimeout, "per-request timeout")
 	flag.Parse()
 
-	collector, err := NewStarlinkCollector(*addr)
+	collector, err := NewStarlinkCollector(*dishAddress)
 	if err != nil {
-	    fmt.Fprintf(os.Stderr, "✗ %v\n", err)
-	    os.Exit(1)
+		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
+		os.Exit(1)
 	}
 
 	defer collector.Close()
 
 	// One-shot connectivity test — bypasses hub/logfile machinery.
-	if *check {
-		if err := runCheck(collector, *timeout); err != nil {
-			fmt.Fprintf(os.Stderr, "✗ could not reach Starlink dish at %s: %v\n", *addr, err)
+	if *oneShot {
+		if err := runConnectivityCheck(collector, *requestTimeout); err != nil {
+			fmt.Fprintf(os.Stderr, "✗ could not reach Starlink dish at %s: %v\n", *dishAddress, err)
 			os.Exit(1)
 		}
 		return
@@ -42,73 +42,75 @@ func main() {
 	}
 	defer logFile.Close()
 
-	capacity := int(HistoryWindow / DefaultPollInterval)
-	hub := NewHub(capacity)
+	hubCapacity := int(BackfillWindow / DefaultPollInterval)
+	hub := NewTelemetryHub(hubCapacity)
 
-	initial, err := LoadTail(*logPath, time.Now().Add(-HistoryWindow))
+	priorSamples, err := LoadRecentSamples(*logPath, time.Now().Add(-BackfillWindow))
 	if err != nil {
 		log.Printf("warning: could not load prior telemetry: %v", err)
-	} else if len(initial) > 0 {
-		hub.SetInitial(initial)
-		log.Printf("loaded %d prior samples from %s", len(initial), *logPath)
+	} else if len(priorSamples) > 0 {
+		hub.SeedHistory(priorSamples)
+		log.Printf("loaded %d prior samples from %s", len(priorSamples), *logPath)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	ctx, stopSignalWatch := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSignalWatch()
 
-	go poll(ctx, collector, hub, logFile)
+	go pollLoop(ctx, collector, hub, logFile)
 
-	if err := serve(ctx, *webAddr, hub, *logPath); err != nil {
+	if err := serveDashboard(ctx, *webListenAddress, hub, *logPath); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ server error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func poll(ctx context.Context, c Collector, hub *Hub, lf *LogFile) {
+// pollLoop polls the dish on a fixed interval until ctx is cancelled, handing
+// each sample to the hub and the log file.
+func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryHub, logFile *LogFile) {
 	ticker := time.NewTicker(DefaultPollInterval)
 	defer ticker.Stop()
 
-	tick := func() {
-		pctx, cancel := context.WithTimeout(ctx, DefaultDialTimeout)
-		defer cancel()
-		s, err := c.Collect(pctx)
+	pollOnce := func() {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, DefaultRequestTimeout)
+		defer cancelPoll()
+		sample, err := collector.Collect(pollCtx)
 		if err != nil {
-			s = Sample{Timestamp: time.Now(), Link: LinkOffline, Err: err.Error()}
+			sample = TelemetrySample{
+				Timestamp: time.Now(),
+				LinkState: LinkStateOffline,
+				PollError: err.Error(),
+			}
 		}
-		hub.Publish(s)
-		if err := lf.Append(s); err != nil {
+		hub.PublishSample(sample)
+		if err := logFile.Append(sample); err != nil {
 			log.Printf("log write failed: %v", err)
 		}
 	}
 
-	tick() // one immediate poll so /events isn't blank on first connect
+	pollOnce() // one immediate poll so /events isn't blank on first connect
 	for {
 		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tick()
+		case <-ctx.Done(): return
+		case <-ticker.C: pollOnce()
 		}
 	}
 }
 
-// runCheck performs a single poll and prints a human-readable summary.
-func runCheck(c Collector, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+// runConnectivityCheck performs a single poll and prints a human-readable summary.
+func runConnectivityCheck(collector TelemetryCollector, timeout time.Duration) error {
+	ctx, cancelTimeout := context.WithTimeout(context.Background(), timeout)
+	defer cancelTimeout()
 
-	s, err := c.Collect(ctx)
-	if err != nil {
-		return err
-	}
+	sample, err := collector.Collect(ctx)
+	if err != nil { return err }
 
 	fmt.Println("✓ Connected to Starlink dish (received live telemetry)")
-	fmt.Printf("  link:      %s\n", s.Link)
-	fmt.Printf("  latency:   %.1f ms\n", s.LatencyMs)
-	fmt.Printf("  drop rate: %.1f%%\n", s.DropRate*100)
-	fmt.Printf("  obstruction: %.2f%% of sky\n", s.ObstructionFraction*100)
-	fmt.Printf("  hardware:  %s\n", s.HardwareVersion)
-	fmt.Printf("  software:  %s\n", s.SoftwareVersion)
-	fmt.Printf("  uptime:    %s\n", time.Duration(s.UptimeSeconds)*time.Second)
+	fmt.Printf("  link:      %s\n", sample.LinkState)
+	fmt.Printf("  latency:   %.1f ms\n", sample.LatencyMs)
+	fmt.Printf("  drop rate: %.1f%%\n", sample.DropRateFraction*100)
+	fmt.Printf("  obstruction: %.2f%% of sky\n", sample.ObstructionFraction*100)
+	fmt.Printf("  hardware:  %s\n", sample.HardwareVersion)
+	fmt.Printf("  software:  %s\n", sample.SoftwareVersion)
+	fmt.Printf("  uptime:    %s\n", time.Duration(sample.UptimeSeconds)*time.Second)
 	return nil
 }
