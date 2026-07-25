@@ -1,62 +1,100 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Houston, We Have a Packet Loss</title>
-<link rel="stylesheet" href="/styles.css">
-<script src="/dashboard.js" defer></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Houston, We Have a Packet Loss</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/dashboard.js" defer></script>
 </head>
+
 <body>
-<div class="console">
+  <div class="console">
 
-  <header>
-    <div class="callsign">
-      <h1>HOUSTON</h1>
-      <span class="tag">We Have a Packet Loss</span>
+    <header>
+      <div class="callsign">
+        <h1>HOUSTON</h1>
+        <span class="callsign-tag">We Have a Packet Loss</span>
+      </div>
+      <div class="uptime-clock">
+        <div class="status-value tabular-num" id="uptime-clock">—:—:—:—</div>
+        <div class="label">Time Since Grounded</div>
+      </div>
+    </header>
+
+    <div class="alarm-strip" id="alarm-strip">
+      <span class="alarm-dot"></span>
+      <span class="alarm-message" id="alarm-message">AWAITING TELEMETRY…</span>
+      <span class="alarm-subtext" id="alarm-subtext">standing by</span>
     </div>
-    <div class="get">
-      <div class="v num" id="get">—:—:—:—</div>
-      <div class="label">Time Since Grounded</div>
+
+    <div class="readouts">
+      <div class="cell" id="cell-latency">
+        <div class="label">Ping</div>
+        <div class="reading"><span class="reading-value" id="value-latency">—</span><span class="reading-unit">ms</span></div>
+      </div>
+      <div class="cell" id="cell-downlink">
+        <div class="label">Download</div>
+        <div class="reading"><span class="reading-value" id="value-downlink">—</span><span class="reading-unit">Mbps</span></div>
+      </div>
+      <div class="cell" id="cell-uplink">
+        <div class="label">Upload</div>
+        <div class="reading"><span class="reading-value" id="value-uplink">—</span><span class="reading-unit">Mbps</span></div>
+      </div>
+      <div class="cell" id="cell-packet-loss">
+        <div class="label">Packet Loss</div>
+        <div class="reading"><span class="reading-value" id="value-packet-loss">—</span><span class="reading-unit">%</span></div>
+      </div>
     </div>
-  </header>
 
-  <div class="alarm-strip" id="alarm">
-    <span class="dot"></span>
-    <span class="msg" id="alarm-msg">AWAITING TELEMETRY…</span>
-    <span class="sub" id="alarm-sub">standing by</span>
-  </div>
+    <div class="range-bar" id="range-bar" role="group" aria-label="Chart time range"></div>
 
-  <div class="readouts">
-    <div class="cell" id="c-lat"><div class="label">Ping</div><div class="read"><span class="val" id="v-lat">—</span><span class="unit">ms</span></div></div>
-    <div class="cell" id="c-down"><div class="label">Download</div><div class="read"><span class="val" id="v-down">—</span><span class="unit">Mbps</span></div></div>
-    <div class="cell" id="c-up"><div class="label">Upload</div><div class="read"><span class="val" id="v-up">—</span><span class="unit">Mbps</span></div></div>
-    <div class="cell" id="c-drop"><div class="label">Packet Loss</div><div class="read"><span class="val" id="v-drop">—</span><span class="unit">%</span></div></div>
-  </div>
-
-  <div class="rangebar" id="ranges" role="group" aria-label="Chart time range"></div>
-  <div class="scopes">
-    <div class="scope"><div class="head"><span class="label">Ping</span><span class="rng" id="rng-lat"></span></div><canvas id="sc-lat"></canvas></div>
-    <div class="scope"><div class="head"><span class="label">Packet Loss</span><span class="rng" id="rng-loss"></span></div><canvas id="sc-loss"></canvas></div>
-    <div class="scope"><div class="head"><span class="label">Download</span><span class="rng" id="rng-down"></span></div><canvas id="sc-down"></canvas></div>
-    <div class="scope"><div class="head"><span class="label">Upload</span><span class="rng" id="rng-up"></span></div><canvas id="sc-up"></canvas></div>
-  </div>
-
-  <div class="strip">
-    <div class="cell"><div class="label">Line of Sight</div><div class="v row" id="v-obs"><span id="v-obs-state">—</span><span class="sub" id="v-obs-pct"></span></div></div>
-    <div class="cell"><div class="label">Terminal</div><div class="v" id="v-hw">—</div></div>
-    <div class="cell"><div class="label">Firmware</div><div class="v" id="v-sw">—</div></div>
-    <div class="cell"><div class="label">Last Contact</div><div class="v num" id="v-seen">—</div></div>
-  </div>
-
-  <footer>
-    <div class="left">
-      <span>HOUSTON, WE HAVE a PACKET LOSS</span>
-      <a href="/log" target="_blank" rel="noopener" class="rec" title="Open the raw JSONL telemetry log">Raw Log</a>
+    <div class="scopes">
+      <div class="scope">
+        <div class="scope-head"><span class="label">Ping</span><span class="scope-range-label" id="chart-range-latency"></span></div>
+        <canvas id="chart-latency"></canvas>
+      </div>
+      <div class="scope">
+        <div class="scope-head"><span class="label">Packet Loss</span><span class="scope-range-label" id="chart-range-packet-loss"></span></div>
+        <canvas id="chart-packet-loss"></canvas>
+      </div>
+      <div class="scope">
+        <div class="scope-head"><span class="label">Download</span><span class="scope-range-label" id="chart-range-downlink"></span></div>
+        <canvas id="chart-downlink"></canvas>
+      </div>
+      <div class="scope">
+        <div class="scope-head"><span class="label">Upload</span><span class="scope-range-label" id="chart-range-uplink"></span></div>
+        <canvas id="chart-uplink"></canvas>
+      </div>
     </div>
-    <span class="conn" id="conn"><span class="d"></span><span id="conn-txt">Connecting…</span></span>
-  </footer>
 
-</div>
+    <div class="status-strip">
+      <div class="cell">
+        <div class="label">Line of Sight</div>
+        <div class="status-value is-row" id="line-of-sight"><span id="line-of-sight-state">—</span><span class="status-note" id="line-of-sight-percent"></span></div>
+      </div>
+      <div class="cell">
+        <div class="label">Terminal</div>
+        <div class="status-value" id="hardware-version">—</div>
+      </div>
+      <div class="cell">
+        <div class="label">Firmware</div>
+        <div class="status-value" id="software-version">—</div>
+      </div>
+      <div class="cell">
+        <div class="label">Last Contact</div>
+        <div class="status-value tabular-num" id="last-contact">—</div>
+      </div>
+    </div>
+
+    <footer>
+      <div class="footer-left">
+        <span>HOUSTON, WE HAVE a PACKET LOSS</span>
+        <a href="/log" target="_blank" rel="noopener" class="raw-log-link" title="Open the raw JSONL telemetry log">Raw Log</a>
+      </div>
+      <span class="connection-status" id="connection-status"><span class="connection-dot"></span><span id="connection-text">Connecting…</span></span>
+    </footer>
+
+  </div>
 </body>
 </html>

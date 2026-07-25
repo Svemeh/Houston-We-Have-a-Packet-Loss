@@ -14,97 +14,103 @@ import (
 	"time"
 )
 
-//go:embed static/*
-var staticFS embed.FS
+// shutdownGracePeriod is how long in-flight requests get to finish after Ctrl+C.
+const shutdownGracePeriod = 3 * time.Second
 
-func serve(ctx context.Context, webAddr string, hub *Hub, logPath string) error {
-	static, err := fs.Sub(staticFS, "static")
+//go:embed static/*
+var embeddedStaticFS embed.FS
+
+func serveDashboard(ctx context.Context, listenAddress string, hub *TelemetryHub, logPath string) error {
+	staticRoot, err := fs.Sub(embeddedStaticFS, "static")
 	if err != nil {
 		return err
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle(RouteIndex, http.FileServer(http.FS(static)))
-	mux.HandleFunc(RouteEvents, streamSamples(hub))
-	mux.HandleFunc(RouteLog, serveLog(logPath))
-	mux.HandleFunc(RouteHistory, serveHistory(logPath))
+	router := http.NewServeMux()
+	router.Handle(RouteIndex, http.FileServer(http.FS(staticRoot)))
+	router.HandleFunc(RouteEvents, newSampleStreamHandler(hub))
+	router.HandleFunc(RouteLog, newRawLogHandler(logPath))
+	router.HandleFunc(RouteHistory, newHistoryHandler(logPath))
 
-	srv := &http.Server{Addr: webAddr, Handler: mux}
+	server := &http.Server{Addr: listenAddress, Handler: router}
 
 	go func() {
 		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutCtx)
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownGracePeriod)
+		defer cancelShutdown()
+		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	shown := webAddr
-	if strings.HasPrefix(shown, ":") {
-		shown = "localhost" + shown
+	displayAddress := listenAddress
+	if strings.HasPrefix(displayAddress, ":") {
+		displayAddress = "localhost" + displayAddress
 	}
-	log.Printf("%s — dashboard live at http://%s (Ctrl+C to stop)", AppName, shown)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Printf("%s — dashboard live at http://%s (Ctrl+C to stop)", AppName, displayAddress)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
 }
 
-func streamSamples(hub *Hub) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+// newSampleStreamHandler serves RouteEvents: one Server-Sent Events stream per
+// browser, opening with a backfill of the hub's recent history.
+func newSampleStreamHandler(hub *TelemetryHub) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		flusher, canFlush := response.(http.Flusher)
+		if !canFlush {
+			http.Error(response, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.Header().Set("Cache-Control", "no-cache")
+		response.Header().Set("Connection", "keep-alive")
 
-		ch, snapshot, unsub := hub.Subscribe()
-		defer unsub()
+		sampleStream, backfill, unsubscribe := hub.Subscribe()
+		defer unsubscribe()
 
-		if len(snapshot) > 0 {
-			payload, err := json.Marshal(snapshot)
+		if len(backfill) > 0 {
+			payload, err := json.Marshal(backfill)
 			if err == nil {
-				fmt.Fprintf(w, "event: backfill\ndata: %s\n\n", payload)
+				fmt.Fprintf(response, "event: backfill\ndata: %s\n\n", payload)
 				flusher.Flush()
 			}
 		}
 
 		for {
 			select {
-			case <-r.Context().Done():
+			case <-request.Context().Done():
 				return
-			case s, ok := <-ch:
-				if !ok {
+			case sample, streamOpen := <-sampleStream:
+				if !streamOpen {
 					return
 				}
-				payload, err := json.Marshal(s)
+				payload, err := json.Marshal(sample)
 				if err != nil {
 					continue
 				}
-				fmt.Fprintf(w, "data: %s\n\n", payload)
+				fmt.Fprintf(response, "data: %s\n\n", payload)
 				flusher.Flush()
 			}
 		}
 	}
 }
 
-func serveLog(path string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
+// newRawLogHandler serves RouteLog: the JSONL file, streamed back verbatim.
+func newRawLogHandler(logPath string) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-cache")
 
-		f, err := os.Open(path)
+		logFile, err := os.Open(logPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				fmt.Fprintln(w, "# no telemetry recorded yet")
+				fmt.Fprintln(response, "# no telemetry recorded yet")
 				return
 			}
-			http.Error(w, "log unavailable: "+err.Error(), http.StatusInternalServerError)
+			http.Error(response, "log unavailable: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer f.Close()
-		_, _ = io.Copy(w, f)
+		defer logFile.Close()
+		_, _ = io.Copy(response, logFile)
 	}
 }
