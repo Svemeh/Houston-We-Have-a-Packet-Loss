@@ -416,25 +416,25 @@
     colorVar: "--chart-packet-loss",
     formatValue: formatPercent,
   });
-  const downlinkScope = createScope({
-    canvasId: "chart-downlink",
-    rangeLabelId: "chart-range-downlink",
+  const downloadScope = createScope({
+    canvasId: "chart-download",
+    rangeLabelId: "chart-range-download",
     unit: "Mbps",
     minAxisTop: 100,
     axisRounding: 100,
-    colorVar: "--chart-downlink",
+    colorVar: "--chart-download",
     formatValue: formatMbps,
   });
-  const uplinkScope = createScope({
-    canvasId: "chart-uplink",
-    rangeLabelId: "chart-range-uplink",
+  const uploadScope = createScope({
+    canvasId: "chart-upload",
+    rangeLabelId: "chart-range-upload",
     unit: "Mbps",
     minAxisTop: 20,
     axisRounding: 20,
-    colorVar: "--chart-uplink",
+    colorVar: "--chart-upload",
     formatValue: formatMbps,
   });
-  const scopes = [latencyScope, packetLossScope, downlinkScope, uplinkScope];
+  const scopes = [latencyScope, packetLossScope, downloadScope, uploadScope];
 
   // ---- Applying samples --------------------------------------------------
   // updateReadouts sets the current-state UI (alarm strip, tiles, uptime clock).
@@ -450,8 +450,8 @@
   function updateReadouts(sample) {
     setLinkState(sample.link_state);
     byId("value-latency").textContent = formatNumber(sample.latency_ms, 0);
-    byId("value-downlink").textContent = formatNumber(sample.downlink_mbps, 1);
-    byId("value-uplink").textContent = formatNumber(sample.uplink_mbps, 1);
+    byId("value-download").textContent = formatNumber(sample.download_mbps, 1);
+    byId("value-upload").textContent = formatNumber(sample.upload_mbps, 1);
     const dropPercent = (sample.drop_rate_fraction || 0) * 100;
     byId("value-packet-loss").textContent = formatNumber(dropPercent, 1);
 
@@ -496,8 +496,8 @@
     const dropPercent = (sample.drop_rate_fraction || 0) * 100;
     const addMethod = silent ? "addPointSilently" : "addPoint";
     packetLossScope[addMethod](timestamp, dropPercent);
-    downlinkScope[addMethod](timestamp, sample.downlink_mbps || 0);
-    uplinkScope[addMethod](timestamp, sample.uplink_mbps || 0);
+    downloadScope[addMethod](timestamp, sample.download_mbps || 0);
+    uploadScope[addMethod](timestamp, sample.upload_mbps || 0);
     if (sample.latency_ms > 0) latencyScope[addMethod](timestamp, sample.latency_ms);
   }
 

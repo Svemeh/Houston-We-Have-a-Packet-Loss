@@ -11,8 +11,8 @@ type TelemetrySample struct {
 	Timestamp           time.Time `json:"timestamp"`
 	LinkState           string    `json:"link_state"`
 	LatencyMs           float64   `json:"latency_ms"`
-	DownlinkMbps        float64   `json:"downlink_mbps"`
-	UplinkMbps          float64   `json:"uplink_mbps"`
+	DownloadMbps        float64   `json:"download_mbps"`
+	UploadMbps          float64   `json:"upload_mbps"`
 	DropRateFraction    float64   `json:"drop_rate_fraction"` // fraction in [0,1]
 	Obstructed          bool      `json:"obstructed"`
 	ObstructionFraction float64   `json:"obstruction_fraction"`

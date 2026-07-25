@@ -49,8 +49,8 @@ func (collector *StarlinkCollector) Collect(ctx context.Context) (TelemetrySampl
 		Timestamp:           time.Now(),
 		LinkState:           deriveLinkState(dropRateFraction, isObstructed),
 		LatencyMs:           float64(dishStatus.GetPopPingLatencyMs()),
-		DownlinkMbps:        float64(dishStatus.GetDownlinkThroughputBps()) / 1e6,	// bps -> Mbps
-		UplinkMbps:          float64(dishStatus.GetUplinkThroughputBps()) / 1e6,	// bps -> Mbps
+		DownloadMbps:        float64(dishStatus.GetDownlinkThroughputBps()) / 1e6,	// bps -> Mbps
+		UploadMbps:          float64(dishStatus.GetUplinkThroughputBps()) / 1e6,	// bps -> Mbps
 		DropRateFraction:    dropRateFraction,
 		Obstructed:          isObstructed,
 		ObstructionFraction: float64(obstructionStats.GetFractionObstructed()),

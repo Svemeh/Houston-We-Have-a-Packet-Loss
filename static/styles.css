@@ -7,8 +7,8 @@
 
   --chart-latency: #ffd50a;
   --chart-packet-loss: #e5455c;
-  --chart-downlink: #00c9c0;
-  --chart-uplink: #b75cf0;
+  --chart-download: #00c9c0;
+  --chart-upload: #b75cf0;
 
   --amber: #f5b740;
   --amber-dim: #8a6d33;

@@ -219,11 +219,11 @@ func mergeWorstCase(worst, candidate TelemetrySample) TelemetrySample {
 	if candidate.LatencyMs > worst.LatencyMs {
 		worst.LatencyMs = candidate.LatencyMs
 	}
-	if candidate.DownlinkMbps > worst.DownlinkMbps {
-		worst.DownlinkMbps = candidate.DownlinkMbps
+	if candidate.DownloadMbps > worst.DownloadMbps {
+		worst.DownloadMbps = candidate.DownloadMbps
 	}
-	if candidate.UplinkMbps > worst.UplinkMbps {
-		worst.UplinkMbps = candidate.UplinkMbps
+	if candidate.UploadMbps > worst.UploadMbps {
+		worst.UploadMbps = candidate.UploadMbps
 	}
 	if candidate.DropRateFraction > worst.DropRateFraction {
 		worst.DropRateFraction = candidate.DropRateFraction
