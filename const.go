@@ -29,8 +29,17 @@ const (
 
 	// Persistence: relative path to raw telemetry log
 	// single JSON-Lines file (one sample per line).
+	// ~250 bytes per sample, 3600 samples per hour = 900KB/hour
 	// Kept as one file so it's grep-, tail-, and cat-friendly.
 	DefaultLogFilePath = "houston.jsonl"
+
+	// LogRetention: samples older than this are pruned from the log.
+	// The log files grows at roughly ~900KB/hour.
+	// so a rough estimate of max file size is: 900KB * LogRetention + LogPruneInterval
+	LogRetention = 72 * time.Hour
+
+	// LogPruneInterval: how often the pruner runs.
+	LogPruneInterval = 1 * time.Hour
 
 	// Link-health heuristic: thresholds for degraded/lost signal.
 	// Used to approximate connection health from packet-drop rate

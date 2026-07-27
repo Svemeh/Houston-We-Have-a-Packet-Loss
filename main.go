@@ -57,6 +57,7 @@ func main() {
 	defer stopSignalWatch()
 
 	go pollLoop(ctx, collector, hub, logFile)
+	go pruneLoop(ctx, logFile)
 
 	if err := serveDashboard(ctx, *webListenAddress, hub, *logPath); err != nil {
 		fmt.Fprintf(os.Stderr, "✗ server error: %v\n", err)
@@ -92,6 +93,28 @@ func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryH
 		select {
 		case <-ctx.Done(): return
 		case <-ticker.C: pollOnce()
+		}
+	}
+}
+
+// pruneLoop prunes the log file to defined size in consts.go "LogRetention"
+// time between each prune is defined in consts.go "LogPruneInterval"
+// This will also run once at startup.
+func pruneLoop(ctx context.Context, logFile *LogFile) {
+	ticker := time.NewTicker(LogPruneInterval)
+	defer ticker.Stop()
+
+	prune := func() {
+		cutoff := time.Now().Add(-LogRetention)
+		if err := logFile.Prune(cutoff); err != nil {
+			log.Printf("log prune failed: %v", err)
+		}
+	}
+	prune()
+	for {
+		select {
+		case <-ctxs.Done(): return
+		case <-ticker.C: prune()
 		}
 	}
 }
