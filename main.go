@@ -113,7 +113,7 @@ func pruneLoop(ctx context.Context, logFile *LogFile) {
 	prune()
 	for {
 		select {
-		case <-ctxs.Done(): return
+		case <-ctx.Done(): return
 		case <-ticker.C: prune()
 		}
 	}
