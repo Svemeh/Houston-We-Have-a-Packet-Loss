@@ -52,21 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 	tracker := NewSkyTracker(observer)
-//////////////////////////
-	go func() {
-		time.Sleep(15 * time.Second) // let the first fetch land
-		for range time.Tick(5 * time.Second) {
-			snapshot := tracker.Snapshot(time.Now())
-			if len(snapshot.Objects) == 0 {
-				log.Printf("sky: nothing above horizon (tracked=%d)", snapshot.TrackedCount)
-				continue
-			}
-			top := snapshot.Objects[0]
-			log.Printf("sky: %d up, %d in cone | highest %s az=%.1f el=%.1f rng=%.0fkm",
-				len(snapshot.Objects), snapshot.InConeCount, top.Name, top.AzimuthDeg, top.ElevationDeg, top.RangeKm)
-		}
-	}()
-////////////////////////////
+
 	priorSamples, err := LoadSamplesSince(*logPath, time.Now().Add(-BackfillWindow))
 	if err != nil {
 		log.Printf("warning: could not load prior telemetry: %v", err)
