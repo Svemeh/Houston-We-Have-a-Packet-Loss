@@ -19,7 +19,9 @@ type TelemetryCollector interface {
 
 // newCollector builds the telemetry source, either: ( live dish / fake dish )
 func newCollector(useFake bool, dishAddress string) (TelemetryCollector, error) {
-	if useFake { return NewFakeCollector(), nil }
+	if useFake {
+		return NewFakeCollector(), nil
+	}
 	return NewStarlinkCollector(dishAddress)
 }
 

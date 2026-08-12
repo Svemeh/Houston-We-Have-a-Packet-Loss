@@ -54,6 +54,26 @@ const (
 	LinkStateObstructed = "OBSTRUCTED"
 	LinkStateNoSignal   = "NO SIGNAL"
 	LinkStateOffline    = "OFFLINE"
+
+	// Sky: satellite tracking.
+	CelestrakStarlinkURL    = "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle"
+	TLERefreshInterval      = 8 * time.Hour
+	TLERefreshRetryInterval = 5 * time.Minute
+	TLEFetchTimeout         = 30 * time.Second
+	TLEStaleAfter           = 3 * 24 * time.Hour
+	SkyTickInterval         = 1 * time.Second
+	skySubscriberQueueDepth = 4
+
+	// Geometry at the Starlink operational altitude (~550 km).
+	HorizonAngularRadiusDeg  = 23.0 // arccos(Re/(Re+h)) — how far a sub-satellite point can be and still be visible
+	ServiceFloorElevationDeg = 25.0 // below this the dish won't use it
+	DefaultConeHalfAngleDeg  = 55.0 // Standard/Mini ~110° full FOV; Flat HP ~140°
+
+	RouteSky       = "/sky"
+	RouteSkyEvents = "/skyevents"
+
+	TLECachePath       = "starlink.tle"
+	CelestrakUserAgent = "houston-packet-loss/0.1"
 )
 
 // TelemetrySample is one poll of the dish: the values it reported, or the
