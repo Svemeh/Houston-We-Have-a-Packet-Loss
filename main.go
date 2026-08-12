@@ -45,7 +45,7 @@ func main() {
 	hubCapacity := int(BackfillWindow / DefaultPollInterval)
 	hub := NewTelemetryHub(hubCapacity)
 
-	priorSamples, err := LoadRecentSamples(*logPath, time.Now().Add(-BackfillWindow))
+	priorSamples, err := LoadSamplesSince(*logPath, time.Now().Add(-BackfillWindow))
 	if err != nil {
 		log.Printf("warning: could not load prior telemetry: %v", err)
 	} else if len(priorSamples) > 0 {
@@ -91,8 +91,10 @@ func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryH
 	pollOnce() // one immediate poll so /events isn't blank on first connect
 	for {
 		select {
-		case <-ctx.Done(): return
-		case <-ticker.C: pollOnce()
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pollOnce()
 		}
 	}
 }
@@ -113,8 +115,10 @@ func pruneLoop(ctx context.Context, logFile *LogFile) {
 	prune()
 	for {
 		select {
-		case <-ctx.Done(): return
-		case <-ticker.C: prune()
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
 		}
 	}
 }
@@ -125,7 +129,9 @@ func runConnectivityCheck(collector TelemetryCollector, timeout time.Duration) e
 	defer cancelTimeout()
 
 	sample, err := collector.Collect(ctx)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	fmt.Println("✓ Connected to Starlink dish (received live telemetry)")
 	fmt.Printf("  link:      %s\n", sample.LinkState)
