@@ -1,6 +1,9 @@
 # custom file storing previous antenna readings
 houston.jsonl
 
+# enviorment variables im hoping to remove later
+.env
+
 # === Go Artifacts ===
 # Binaries and executables
 *.exe
