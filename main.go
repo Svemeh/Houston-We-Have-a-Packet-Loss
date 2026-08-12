@@ -15,10 +15,11 @@ func main() {
 	webListenAddress := flag.String("web", DefaultWebAddress, "dashboard listen address")
 	logPath := flag.String("log", DefaultLogFilePath, "telemetry log file (JSONL)")
 	oneShot := flag.Bool("oneshot", false, "run a one-shot connectivity check and exit")
+	useFake := flag.Bool("fake", false, "generate fake data instead of polling from the antenna")
 	requestTimeout := flag.Duration("timeout", DefaultRequestTimeout, "per-request timeout")
 	flag.Parse()
 
-	collector, err := NewStarlinkCollector(*dishAddress)
+	collector, err := newCollector(*useFake, *dishAddress)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
 		os.Exit(1)

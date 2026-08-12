@@ -17,6 +17,12 @@ type TelemetryCollector interface {
 	Close() error
 }
 
+// newCollector builds the telemetry source, either: ( live dish / fake dish )
+func newCollector(useFake bool, dishAddress string) (TelemetryCollector, error) {
+	if useFake { return NewFakeCollector(), nil }
+	return NewStarlinkCollector(dishAddress)
+}
+
 type StarlinkCollector struct {
 	connection   *grpc.ClientConn
 	deviceClient device.DeviceClient
