@@ -1,3 +1,6 @@
+# custom file storing previous antenna readings
+houston.jsonl
+
 # === Go Artifacts ===
 # Binaries and executables
 *.exe
