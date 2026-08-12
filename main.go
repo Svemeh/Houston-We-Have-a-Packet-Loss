@@ -15,10 +15,11 @@ func main() {
 	webListenAddress := flag.String("web", DefaultWebAddress, "dashboard listen address")
 	logPath := flag.String("log", DefaultLogFilePath, "telemetry log file (JSONL)")
 	oneShot := flag.Bool("oneshot", false, "run a one-shot connectivity check and exit")
+	useFake := flag.Bool("fake", false, "generate fake data instead of polling from the antenna")
 	requestTimeout := flag.Duration("timeout", DefaultRequestTimeout, "per-request timeout")
 	flag.Parse()
 
-	collector, err := NewStarlinkCollector(*dishAddress)
+	collector, err := newCollector(*useFake, *dishAddress)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
 		os.Exit(1)
@@ -45,7 +46,7 @@ func main() {
 	hubCapacity := int(BackfillWindow / DefaultPollInterval)
 	hub := NewTelemetryHub(hubCapacity)
 
-	priorSamples, err := LoadRecentSamples(*logPath, time.Now().Add(-BackfillWindow))
+	priorSamples, err := LoadSamplesSince(*logPath, time.Now().Add(-BackfillWindow))
 	if err != nil {
 		log.Printf("warning: could not load prior telemetry: %v", err)
 	} else if len(priorSamples) > 0 {
@@ -91,8 +92,10 @@ func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryH
 	pollOnce() // one immediate poll so /events isn't blank on first connect
 	for {
 		select {
-		case <-ctx.Done(): return
-		case <-ticker.C: pollOnce()
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pollOnce()
 		}
 	}
 }
@@ -113,8 +116,10 @@ func pruneLoop(ctx context.Context, logFile *LogFile) {
 	prune()
 	for {
 		select {
-		case <-ctx.Done(): return
-		case <-ticker.C: prune()
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
 		}
 	}
 }
@@ -125,7 +130,9 @@ func runConnectivityCheck(collector TelemetryCollector, timeout time.Duration) e
 	defer cancelTimeout()
 
 	sample, err := collector.Collect(ctx)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	fmt.Println("✓ Connected to Starlink dish (received live telemetry)")
 	fmt.Printf("  link:      %s\n", sample.LinkState)

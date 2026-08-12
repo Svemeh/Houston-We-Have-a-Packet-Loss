@@ -17,6 +17,12 @@ type TelemetryCollector interface {
 	Close() error
 }
 
+// newCollector builds the telemetry source, either: ( live dish / fake dish )
+func newCollector(useFake bool, dishAddress string) (TelemetryCollector, error) {
+	if useFake { return NewFakeCollector(), nil }
+	return NewStarlinkCollector(dishAddress)
+}
+
 type StarlinkCollector struct {
 	connection   *grpc.ClientConn
 	deviceClient device.DeviceClient
@@ -27,7 +33,7 @@ func NewStarlinkCollector(dishAddress string) (*StarlinkCollector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating client: %w", err)
 	}
-	return &StarlinkCollector{connection: connection, deviceClient: device.NewDeviceClient(connection),}, nil
+	return &StarlinkCollector{connection: connection, deviceClient: device.NewDeviceClient(connection)}, nil
 }
 
 func (collector *StarlinkCollector) Collect(ctx context.Context) (TelemetrySample, error) {
@@ -49,8 +55,8 @@ func (collector *StarlinkCollector) Collect(ctx context.Context) (TelemetrySampl
 		Timestamp:           time.Now(),
 		LinkState:           deriveLinkState(dropRateFraction, isObstructed),
 		LatencyMs:           float64(dishStatus.GetPopPingLatencyMs()),
-		DownloadMbps:        float64(dishStatus.GetDownlinkThroughputBps()) / 1e6,	// bps -> Mbps
-		UploadMbps:          float64(dishStatus.GetUplinkThroughputBps()) / 1e6,	// bps -> Mbps
+		DownloadMbps:        float64(dishStatus.GetDownlinkThroughputBps()) / 1e6, // bps -> Mbps
+		UploadMbps:          float64(dishStatus.GetUplinkThroughputBps()) / 1e6,   // bps -> Mbps
 		DropRateFraction:    dropRateFraction,
 		Obstructed:          isObstructed,
 		ObstructionFraction: float64(obstructionStats.GetFractionObstructed()),
@@ -64,9 +70,13 @@ func (collector *StarlinkCollector) Close() error { return collector.connection.
 
 func deriveLinkState(dropRateFraction float64, isObstructed bool) string {
 	switch {
-	case isObstructed: return LinkStateObstructed
-	case dropRateFraction >= DropRateNoSignalThreshold: return LinkStateNoSignal
-	case dropRateFraction > DropRateDegradedThreshold: return LinkStateDegraded
-	default: return LinkStateOnline
+	case isObstructed:
+		return LinkStateObstructed
+	case dropRateFraction >= DropRateNoSignalThreshold:
+		return LinkStateNoSignal
+	case dropRateFraction > DropRateDegradedThreshold:
+		return LinkStateDegraded
+	default:
+		return LinkStateOnline
 	}
 }

@@ -3,14 +3,20 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
-	"net/http"
+	"log"
 	"os"
-	"strings"
+	"sync"
 	"time"
 )
 
 const (
+	// Scanner sizing: start with a 64 KB line buffer, refuse anything past 1 MB
+	// so a corrupt file can't be read into memory as one enormous "line".
+	scannerInitialBufferBytes = 64 * 1024
+	scannerMaxLineBytes       = 1 << 20
+
 	// readWholeFile tells scanLogTail not to seek — read from byte zero.
 	readWholeFile = -1
 
@@ -22,65 +28,152 @@ const (
 	minTailBytes         = 1 << 20
 )
 
-// historyResponse is what RouteHistory returns. BucketWidthMs tells the client how
-// far apart adjacent points are so it can size its gap-detection threshold —
-// without it a downsampled series renders as disconnected fragments.
-type historyResponse struct {
-	RequestedRange string            `json:"requested_range"`
-	WindowStart    time.Time         `json:"window_start"`
-	BucketWidthMs  int64             `json:"bucket_width_ms"`
-	RawCount       int               `json:"raw_count"`  // samples read before downsampling
-	KeptCount      int               `json:"kept_count"` // samples actually returned
-	Samples        []TelemetrySample `json:"samples"`
+type LogFile struct {
+	path           string
+	mutex          sync.Mutex // serializes Append; concurrent HTTP reads are OS-safe
+	file           *os.File
+	bufferedWriter *bufio.Writer
 }
 
-func newHistoryHandler(logPath string) http.HandlerFunc {
-	return func(response http.ResponseWriter, request *http.Request) {
-		requestedRange := strings.TrimSpace(request.URL.Query().Get("range"))
-
-		// A zero oldestWanted means "read everything".
-		var oldestWanted time.Time
-		if requestedRange != "" && requestedRange != RangeAll {
-			requestedSpan, err := time.ParseDuration(requestedRange)
-			if err != nil || requestedSpan <= 0 {
-				http.Error(response, "range must be a duration like 15m, or "+RangeAll, http.StatusBadRequest)
-				return
-			}
-			if requestedSpan > MaxHistoryRange {
-				requestedSpan = MaxHistoryRange
-			}
-			oldestWanted = time.Now().Add(-requestedSpan)
-		}
-
-		samples, err := LoadSamplesSince(logPath, oldestWanted)
-		if err != nil {
-			http.Error(response, "history unavailable: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		now := time.Now()
-		windowStart := oldestWanted
-		if windowStart.IsZero() {
-			// "All" — the window begins at the oldest record we have.
-			windowStart = now
-			if len(samples) > 0 {
-				windowStart = samples[0].Timestamp
-			}
-		}
-
-		points, bucketWidth := DownsampleWorstCase(samples, windowStart, now, MaxHistoryPoints)
-
-		response.Header().Set("Content-Type", "application/json")
-		response.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(response).Encode(historyResponse{
-			RequestedRange: requestedRange,
-			WindowStart:    windowStart,
-			BucketWidthMs:  bucketWidth.Milliseconds(),
-			RawCount:       len(samples),
-			KeptCount:      len(points),
-			Samples:        points,
-		})
+func OpenLogFile(path string) (*LogFile, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
 	}
+	return &LogFile{path: path, file: file, bufferedWriter: bufio.NewWriter(file)}, nil
+}
+
+// Append writes one sample to the file as a single JSON line and flushes to disk.
+func (logFile *LogFile) Append(sample TelemetrySample) error {
+	jsonLine, err := json.Marshal(sample)
+	if err != nil {
+		return err
+	}
+	logFile.mutex.Lock()
+	defer logFile.mutex.Unlock()
+	if _, err := logFile.bufferedWriter.Write(jsonLine); err != nil {
+		return err
+	}
+	if err := logFile.bufferedWriter.WriteByte('\n'); err != nil {
+		return err
+	}
+	return logFile.bufferedWriter.Flush()
+}
+
+func (logFile *LogFile) Close() error {
+	logFile.mutex.Lock()
+	defer logFile.mutex.Unlock()
+	if err := logFile.bufferedWriter.Flush(); err != nil {
+		return err
+	}
+	return logFile.file.Close()
+}
+
+// Prune rewrites the log file, keeping only samples at or after cutoff.
+// Uses write-to-temp + atomic rename so a crash mid-prune never loses data.
+func (logFile *LogFile) Prune(cutoff time.Time) error {
+	logFile.mutex.Lock()
+	defer logFile.mutex.Unlock()
+
+	// Flush and close the current writer — we're about to replace the file
+	// underneath it.
+	if err := logFile.bufferedWriter.Flush(); err != nil {
+		return err
+	}
+	if err := logFile.file.Close(); err != nil {
+		return err
+	}
+
+	tempPath := logFile.path + ".tmp"
+	kept, total, err := rewriteKeepingSamplesSince(logFile.path, tempPath, cutoff)
+	if err != nil {
+		_ = os.Remove(tempPath) // clean up on failure
+		// Best-effort: reopen the original so appends can resume even after a failed prune.
+		if reopenErr := logFile.reopenAppend(); reopenErr != nil {
+			return fmt.Errorf("prune failed: %w; reopen also failed: %v", err, reopenErr)
+		}
+		return err
+	}
+
+	if err := os.Rename(tempPath, logFile.path); err != nil {
+		_ = os.Remove(tempPath)
+		if reopenErr := logFile.reopenAppend(); reopenErr != nil {
+			return fmt.Errorf("rename failed: %w; reopen also failed: %v", err, reopenErr)
+		}
+		return err
+	}
+
+	if dropped := total - kept; dropped > 0 {
+		log.Printf("pruned %d samples older than %s (kept %d)", dropped, cutoff.Format(time.RFC3339), kept)
+	}
+	return logFile.reopenAppend()
+}
+
+// reopenAppend restores logFile.file and logFile.bufferedWriter after a prune.
+// Assumes the caller already holds the mutex.
+func (logFile *LogFile) reopenAppend() error {
+	file, err := os.OpenFile(logFile.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	logFile.file = file
+	logFile.bufferedWriter = bufio.NewWriter(file)
+	return nil
+}
+
+// rewriteKeepingSamplesSince reads sourcePath line-by-line and writes the
+// samples at or after cutoff to destPath. Returns (kept, total, err).
+// Corrupted lines are skipped (matching the read-side behavior elsewhere).
+func rewriteKeepingSamplesSince(sourcePath, destPath string, cutoff time.Time) (kept, total int, err error) {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil // nothing to prune
+		}
+		return 0, 0, err
+	}
+	defer source.Close()
+
+	dest, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, 0, err
+	}
+	writer := bufio.NewWriter(dest)
+
+	scanner := bufio.NewScanner(source)
+	scanner.Buffer(make([]byte, scannerInitialBufferBytes), scannerMaxLineBytes)
+
+	for scanner.Scan() {
+		total++
+		var sample TelemetrySample
+		if err := json.Unmarshal(scanner.Bytes(), &sample); err != nil {
+			continue // skip corrupt lines
+		}
+		if sample.Timestamp.Before(cutoff) {
+			continue
+		}
+		if _, err := writer.Write(scanner.Bytes()); err != nil {
+			dest.Close()
+			return kept, total, err
+		}
+		if err := writer.WriteByte('\n'); err != nil {
+			dest.Close()
+			return kept, total, err
+		}
+		kept++
+	}
+	if err := scanner.Err(); err != nil {
+		dest.Close()
+		return kept, total, err
+	}
+	if err := writer.Flush(); err != nil {
+		dest.Close()
+		return kept, total, err
+	}
+	if err := dest.Close(); err != nil {
+		return kept, total, err
+	}
+	return kept, total, nil
 }
 
 // LoadSamplesSince returns every sample at or after oldestWanted, oldest first.
