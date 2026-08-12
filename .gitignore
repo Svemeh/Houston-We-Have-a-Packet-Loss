@@ -1,0 +1,52 @@
+# === Go Artifacts ===
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+out/
+
+# Test artifacts
+*.test
+*.out
+*.coverprofile
+profile.cov
+
+# Workspaces
+go.work
+go.work.sum
+
+# === OS Junk Files ===
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V1
+.fseventsd
+.Spotlight-V100
+.Trashes
+VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.lnk
+*.cab
+[Dd]ownloads/
+$RECYCLE.BIN/
+System Volume Information/
+
+# === IDEs & Editors ===
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
