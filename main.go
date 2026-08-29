@@ -64,7 +64,7 @@ func main() {
 	ctx, stopSignalWatch := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSignalWatch()
 
-	go pollLoop(ctx, collector, hub, logFile)
+	go pollLoop(ctx, collector, hub, logFile, tracker)
 	go pruneLoop(ctx, logFile)
 	go tracker.Run(ctx)
 
@@ -75,10 +75,13 @@ func main() {
 }
 
 // pollLoop polls the dish on a fixed interval until ctx is cancelled, handing
-// each sample to the hub and the log file.
-func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryHub, logFile *LogFile) {
+// each sample to the hub and the log file, and each boresight reading to the
+// sky tracker so the service cone follows where the dish is actually aimed.
+func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryHub, logFile *LogFile, tracker *SkyTracker) {
 	ticker := time.NewTicker(DefaultPollInterval)
 	defer ticker.Stop()
+
+	loggedBoresight := false
 
 	pollOnce := func() {
 		pollCtx, cancelPoll := context.WithTimeout(ctx, DefaultRequestTimeout)
@@ -89,6 +92,14 @@ func pollLoop(ctx context.Context, collector TelemetryCollector, hub *TelemetryH
 				Timestamp: time.Now(),
 				LinkState: LinkStateOffline,
 				PollError: err.Error(),
+			}
+		}
+		if sample.BoresightValid {
+			tracker.SetBoresight(sample.BoresightAzimuthDeg, sample.BoresightElevationDeg)
+			if !loggedBoresight {
+				log.Printf("sky: dish reports boresight az %.2f° el %.2f° — cone follows it",
+					sample.BoresightAzimuthDeg, sample.BoresightElevationDeg)
+				loggedBoresight = true
 			}
 		}
 		hub.PublishSample(sample)
@@ -149,6 +160,11 @@ func runConnectivityCheck(collector TelemetryCollector, timeout time.Duration) e
 	fmt.Printf("  obstruction: %.2f%% of sky\n", sample.ObstructionFraction*100)
 	fmt.Printf("  hardware:  %s\n", sample.HardwareVersion)
 	fmt.Printf("  software:  %s\n", sample.SoftwareVersion)
+	if sample.BoresightValid {
+		fmt.Printf("  boresight: az %.2f° el %.2f°\n", sample.BoresightAzimuthDeg, sample.BoresightElevationDeg)
+	} else {
+		fmt.Println("  boresight: not reported by this firmware")
+	}
 	fmt.Printf("  uptime:    %s\n", time.Duration(sample.UptimeSeconds)*time.Second)
 	return nil
 }

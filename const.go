@@ -66,7 +66,7 @@ const (
 
 	// Geometry at the Starlink operational altitude (~550 km).
 	HorizonAngularRadiusDeg  = 23.0 // arccos(Re/(Re+h)) — how far a sub-satellite point can be and still be visible
-	ServiceFloorElevationDeg = 25.0 // below this the dish won't use it
+	ServiceFloorElevationDeg = 10.0 // below this the dish won't use it
 	DefaultConeHalfAngleDeg  = 55.0 // Standard/Mini ~110° full FOV; Flat HP ~140°
 
 	RouteSky       = "/sky"
@@ -90,6 +90,9 @@ type TelemetrySample struct {
 	DropRateFraction    float64   `json:"drop_rate_fraction"` // fraction in [0,1]
 	Obstructed          bool      `json:"obstructed"`
 	ObstructionFraction float64   `json:"obstruction_fraction"`
+	BoresightAzimuthDeg   float64 `json:"boresight_az_deg"`
+	BoresightElevationDeg float64 `json:"boresight_el_deg"`
+	BoresightValid        bool    `json:"boresight_valid"`
 	UptimeSeconds       uint64    `json:"uptime_seconds"`
 	HardwareVersion     string    `json:"hardware_version"`
 	SoftwareVersion     string    `json:"software_version"`

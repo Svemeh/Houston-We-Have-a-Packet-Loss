@@ -275,9 +275,9 @@
 
   const describeCone = (snapshot) => {
     const tiltDeg = Math.round(90 - snapshot.cone_elevation_deg);
-    const bearing = snapshot.cone_azimuth_deg === 0 ? "north" : "south";
-    const aim = tiltDeg === 0 ? "straight up" : `tilted ${tiltDeg}° ${bearing}`;
-    return `${snapshot.cone_half_angle_deg}° cone, ${aim}${snapshot.cone_is_assumed ? " (assumed)" : ""}`;
+    if (snapshot.cone_is_assumed) return `${snapshot.cone_half_angle_deg}° cone, zenith (no boresight yet)`;
+    const compass = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(snapshot.cone_azimuth_deg / 45) % 8];
+    return `${snapshot.cone_half_angle_deg}° cone, ${tiltDeg}° toward ${compass}`;
   };
 
   const applySnapshot = (snapshot) => {

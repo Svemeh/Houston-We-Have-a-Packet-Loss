@@ -20,24 +20,26 @@ import (
 )
 
 // Where the dish sits. Read from the environment so a real position never
-// lands in the repo.
+// lands in the repo. Altitude is deliberately absent: at 550 km slant range a
+// couple of hundred metres moves a look angle by ~0.02°, well under the 0.1°
+// we round to on the wire.
 type Observer struct {
 	LatitudeDeg  float64
 	LongitudeDeg float64
-	AltitudeM    float64
-	ConeTiltDeg  float64 // negative means "estimate from latitude"
 }
 
 const (
 	envLatitude  = "HOUSTON_LAT"
 	envLongitude = "HOUSTON_LON"
-	envAltitude  = "HOUSTON_ALT_M"   // optional, defaults to 0
-	envConeTilt  = "HOUSTON_TILT_DEG" // optional, estimated from latitude when unset
 	envFilePath  = ".env"
 )
 
 // LoadObserver prefers real environment variables and falls back to .env.
 // A missing .env is not an error; missing coordinates are.
+//
+// The dish knows its own position, but refuses to hand it over unless
+// location_request_mode is set to LOCAL — a config write that needs SpaceX's
+// signing credentials. So these two values stay manual.
 func LoadObserver() (Observer, error) {
 	loadEnvFile(envFilePath)
 
@@ -52,18 +54,8 @@ func LoadObserver() (Observer, error) {
 	if latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
 		return Observer{}, fmt.Errorf("observer position out of range: %.4f, %.4f", latitude, longitude)
 	}
-	altitude, _ := strconv.ParseFloat(os.Getenv(envAltitude), 64) // optional
 
-	coneTilt := -1.0 // sentinel: NewSkyTracker estimates from latitude
-	if raw := strings.TrimSpace(os.Getenv(envConeTilt)); raw != "" {
-		parsed, err := strconv.ParseFloat(raw, 64)
-		if err != nil || parsed < 0 || parsed > 90 {
-			return Observer{}, fmt.Errorf("%s=%q must be 0–90 degrees from vertical", envConeTilt, raw)
-		}
-		coneTilt = parsed
-	}
-
-	return Observer{LatitudeDeg: latitude, LongitudeDeg: longitude, AltitudeM: altitude, ConeTiltDeg: coneTilt}, nil
+	return Observer{LatitudeDeg: latitude, LongitudeDeg: longitude}, nil
 }
 
 func requiredFloat(key string) (float64, error) {
@@ -112,9 +104,7 @@ type SkyObject struct {
 	AzimuthDeg   float64 `json:"az"`
 	ElevationDeg float64 `json:"el"`
 	RangeKm      float64 `json:"range_km"`
-	// InCone is true when the satellite is inside the assumed service cone —
-	// see SkySnapshot.ConeIsAssumed before trusting it.
-	InCone bool `json:"in_cone"`
+	InCone       bool    `json:"in_cone"`
 }
 
 // SkySnapshot is everything above the horizon at one instant, plus enough
@@ -130,8 +120,10 @@ type SkySnapshot struct {
 	ConeHalfAngleDeg float64     `json:"cone_half_angle_deg"`
 	ConeAzimuthDeg   float64     `json:"cone_azimuth_deg"`
 	ConeElevationDeg float64     `json:"cone_elevation_deg"`
-	ServiceFloorDeg  float64	 `json:"service_floor_deg"`
-	ConeIsAssumed    bool        `json:"cone_is_assumed"` // true while the tilt is estimated
+	ServiceFloorDeg  float64     `json:"service_floor_deg"`
+	// ConeIsAssumed is true while we're pointing the cone at zenith because the
+	// dish hasn't told us where it's actually aimed.
+	ConeIsAssumed bool `json:"cone_is_assumed"`
 }
 
 type trackedSatellite struct {
@@ -142,46 +134,42 @@ type trackedSatellite struct {
 // SkyTracker holds the current element set, propagates it on a tick, and fans
 // each snapshot out to connected browsers.
 type SkyTracker struct {
-	observer         Observer
-	coneAzimuthDeg   float64
-	coneElevationDeg float64
-	httpClient       *http.Client
+	observer   Observer
+	httpClient *http.Client
 
 	mutex             sync.RWMutex
 	elements          []trackedSatellite
 	catalogCount      int
 	elementsFetchedAt time.Time
 	subscribers       map[chan SkySnapshot]struct{}
+
+	// Boresight as last reported by the dish. Written by pollLoop, read on
+	// every tick. haveBoresight stays false until the first successful poll,
+	// and on firmware too old to report it.
+	coneAzimuthDeg   float64
+	coneElevationDeg float64
+	haveBoresight    bool
 }
 
 func NewSkyTracker(observer Observer) *SkyTracker {
-	tiltDeg := observer.ConeTiltDeg
-	if tiltDeg < 0 {
-		tiltDeg = defaultConeTilt(observer.LatitudeDeg)
-	}
-
-	// Dishes lean toward the equator, so the cone axis points south from the
-	// northern hemisphere and north from the southern.
-	coneAzimuth := 180.0
-	if observer.LatitudeDeg < 0 {
-		coneAzimuth = 0
-	}
-
 	return &SkyTracker{
-		observer:         observer,
-		coneAzimuthDeg:   coneAzimuth,
-		coneElevationDeg: 90 - tiltDeg,
-		httpClient:       &http.Client{Timeout: TLEFetchTimeout},
-		subscribers:      make(map[chan SkySnapshot]struct{}),
+		observer:    observer,
+		httpClient:  &http.Client{Timeout: TLEFetchTimeout},
+		subscribers: make(map[chan SkySnapshot]struct{}),
+		// Until the dish reports in, aim straight up and say so.
+		coneElevationDeg: 90,
 	}
 }
 
-// defaultConeTilt approximates how far from vertical a dish parks itself.
-// This is an empirical fit, not derived geometry: dishes lean toward the
-// equator to face the densest reachable part of the constellation, and lean
-// harder the further from it you are. Override with HOUSTON_TILT_DEG.
-func defaultConeTilt(latitudeDeg float64) float64 {
-	return math.Min(math.Abs(latitudeDeg)*0.55, 50)
+// SetBoresight records where the dish says it is aimed. Called from pollLoop
+// on every successful poll; the values only change if the dish is physically
+// moved, so this is almost always a no-op write.
+func (tracker *SkyTracker) SetBoresight(azimuthDeg, elevationDeg float64) {
+	tracker.mutex.Lock()
+	defer tracker.mutex.Unlock()
+	tracker.coneAzimuthDeg = azimuthDeg
+	tracker.coneElevationDeg = elevationDeg
+	tracker.haveBoresight = true
 }
 
 // angularSeparation is the great-circle angle between two directions in the
@@ -391,8 +379,8 @@ func parseElementStream(reader io.Reader, observerLatitudeDeg float64) ([]tracke
 
 // canReachLatitude is the cheap prefilter. A satellite's ground track never
 // exceeds its inclination, so anything that can't get within one horizon
-// radius of us is dead weight — at 61°N that discards the whole 43° shell.
-// Inclination sits at columns 9–16 of TLE line 2.
+// radius of us is dead weight. At 60°N this discards nothing, since Starlink's
+// lowest shell is 43°; it earns its keep further north.
 func canReachLatitude(tleLine2 string, observerLatitudeDeg float64) bool {
 	if len(tleLine2) < 16 {
 		return false
@@ -415,6 +403,9 @@ func (tracker *SkyTracker) Snapshot(now time.Time) SkySnapshot {
 	elements := tracker.elements
 	catalogCount := tracker.catalogCount
 	fetchedAt := tracker.elementsFetchedAt
+	coneAzimuthDeg := tracker.coneAzimuthDeg
+	coneElevationDeg := tracker.coneElevationDeg
+	haveBoresight := tracker.haveBoresight
 	tracker.mutex.RUnlock()
 
 	snapshot := SkySnapshot{
@@ -424,10 +415,10 @@ func (tracker *SkyTracker) Snapshot(now time.Time) SkySnapshot {
 		CatalogCount:     catalogCount,
 		ElementsAgeS:     -1,
 		ConeHalfAngleDeg: DefaultConeHalfAngleDeg,
-		ConeAzimuthDeg:   tracker.coneAzimuthDeg,
-		ConeElevationDeg: tracker.coneElevationDeg,
+		ConeAzimuthDeg:   coneAzimuthDeg,
+		ConeElevationDeg: coneElevationDeg,
 		ServiceFloorDeg:  ServiceFloorElevationDeg,
-		ConeIsAssumed:    true, // tilt is estimated, not read from the dish
+		ConeIsAssumed:    !haveBoresight,
 	}
 	if !fetchedAt.IsZero() {
 		elementAge := now.Sub(fetchedAt)
@@ -448,14 +439,13 @@ func (tracker *SkyTracker) Snapshot(now time.Time) SkySnapshot {
 		Latitude:  tracker.observer.LatitudeDeg * satellite.DEG2RAD,
 		Longitude: tracker.observer.LongitudeDeg * satellite.DEG2RAD,
 	}
-	observerAltitudeKm := tracker.observer.AltitudeM / 1000
 
 	for _, tracked := range elements {
 		position, _ := satellite.Propagate(tracked.propagator, year, int(month), day, hour, minute, second)
 		if math.IsNaN(position.X) || math.IsNaN(position.Y) || math.IsNaN(position.Z) {
 			continue // decayed or otherwise unpropagatable element
 		}
-		lookAngles := satellite.ECIToLookAngles(position, observerCoords, observerAltitudeKm, julianDay)
+		lookAngles := satellite.ECIToLookAngles(position, observerCoords, 0, julianDay)
 
 		elevationDeg := lookAngles.El * satellite.RAD2DEG
 		if elevationDeg < 0 {
@@ -463,9 +453,9 @@ func (tracker *SkyTracker) Snapshot(now time.Time) SkySnapshot {
 		}
 		azimuthDeg := math.Mod(lookAngles.Az*satellite.RAD2DEG+360, 360)
 
-		// Inside the tilted cone, and high enough for the dish to bother.
+		// Inside the dish's field of view, and high enough for it to bother.
 		inCone := elevationDeg >= ServiceFloorElevationDeg &&
-			angularSeparation(azimuthDeg, elevationDeg, tracker.coneAzimuthDeg, tracker.coneElevationDeg) <= DefaultConeHalfAngleDeg
+			angularSeparation(azimuthDeg, elevationDeg, coneAzimuthDeg, coneElevationDeg) <= DefaultConeHalfAngleDeg
 		if inCone {
 			snapshot.InConeCount++
 		}
